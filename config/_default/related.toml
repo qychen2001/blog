@@ -4,9 +4,9 @@ threshold = 60
 toLower = false
 
 [[indices]]
-name = "tags"
+name = "标签"
 weight = 100
 
 [[indices]]
-name = "categories"
+name = "分类"
 weight = 200
