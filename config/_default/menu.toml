@@ -16,9 +16,9 @@ url = "https://github.com/qychen2001"
 icon = "brand-github"
 
 [[social]]
-identifier = "twitter"
-name = "Twitter"
-url = "https://twitter.com"
+identifier = "homepage"
+name = "homepage"
+url = "https://qychen2001.github.io/"
 
 [social.params]
-icon = "brand-twitter"
+icon = "link"
