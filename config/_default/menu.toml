@@ -29,4 +29,4 @@ name = "Google Scholar"
 url = "https://scholar.google.com.hk/citations?user=7ir_xZQAAAAJ&hl=zh-CN"
 
 [social.params]
-icon = "brand-google"
+icon = "google-scholar"
