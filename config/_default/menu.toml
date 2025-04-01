@@ -17,8 +17,16 @@ icon = "brand-github"
 
 [[social]]
 identifier = "homepage"
-name = "homepage"
+name = "Homepage"
 url = "https://qychen2001.github.io/"
 
 [social.params]
 icon = "link"
+
+[[social]]
+identifier = "scholar"
+name = "Google Scholar"
+url = "https://scholar.google.com.hk/citations?user=7ir_xZQAAAAJ&hl=zh-CN"
+
+[social.params]
+icon = "brand-google"
