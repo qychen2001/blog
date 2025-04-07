@@ -294,7 +294,7 @@ $$
 \mathcal{L}_{\text{GRPO}}(\theta) = \underbrace{\mathcal{L}_{\text{clip}}(\theta)}_{\text{最大化奖励}} - \underbrace{w_1\mathbb{D}_{\text{KL}}(\pi_\theta || \pi_{\text{orig}})}_{\text{惩罚KL散度}}
 $$
 
-# 关于R1的更多思考：残酷的简洁
+## 关于R1的更多思考：残酷的简洁
 最后，关于R1再多说几句。
 
 无论是否被过度吹捧，从论文中可以明显看出，R1在LLM训练中采用了**剥离一切冗余、直截了当的方法**，优先考虑残酷的简洁而非复杂性。GRPO只是冰山一角。以下是更多体现其残酷简洁的例子：
