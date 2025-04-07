@@ -50,17 +50,13 @@ LLM的训练可以分为预训练和后训练两个阶段：
 
 具体来说，我们用$R_\phi$表示可学习的奖励模型。给定一个提示$p$，LLM生成$N$个响应$\{r_1, r_2,...r_N\}$。然后根据人类评分者的偏好，响应$r_i$优于$r_j$，奖励模型通过最小化以下目标函数进行训练：
 
-$ \begin{align}
+$$
 \mathcal{L}(\phi) = -\log \sigma(R_\phi(p, r_i) - R_\phi(p, r_j)),
-\end{align}
-$
+$$
 其中$\sigma$表示sigmoid函数。
 
-> **旁注**：该目标函数源自**Bradley-Terry模型**，该模型定义了评分者偏好$r_i$而非$r_j$的概率为：
-> $  
-> P(r_i \succ r_j) = \frac{\exp\big(R_\phi(p, r_i)\big)}{\exp\big(R_\phi(p, r_i)\big) + \exp\big(R_\phi(p, r_j)\big)}.  
-> $  
-> 对该概率取负对数似然得到上述损失函数$\mathcal{L}(\phi)$。sigmoid函数$\sigma$可以对Bradley-Terry整理后得到。
+> **旁注**：该目标函数源自**Bradley-Terry模型**，该模型定义了评分者偏好$r_i$而非$r_j$的概率为：$$
+P(r_i \succ r_j) = \frac{\exp\big(R_\phi(p, r_i)\big)}{\exp\big(R_\phi(p, r_i)\big) + \exp\big(R_\phi(p, r_j)\big)}.$$对该概率取负对数似然得到上述损失函数$\mathcal{L}(\phi)$。sigmoid函数$\sigma$可以对Bradley-Terry整理后得到。
 
 ## PPO
 
@@ -95,11 +91,9 @@ $
 ### 广义优势估计 (GAE)
 我们的策略更新是为了优化**优势**——直观地说，它定义了在状态 $s_t$（即提示 + 到目前为止生成的词）下，**特定动作** $a_t$（即词）相对于策略将采取的**平均动作**的优越程度。形式上：
 
-$
-\begin{align}
+$$
 A_t = Q(s_t, a_t) - V(s_t)
-\end{align}
-$
+$$
 
 其中 $Q(s_t, a_t)$ 是在状态 $s_t$ 下采取特定动作 $a_t$ 的预期累积奖励，而 $V(s_t)$ 是策略在状态 $s_t$ 下采取平均动作的预期累积奖励。
 
@@ -140,11 +134,9 @@ $
 
 给定一个部分状态 $s_t$，我们希望预测在完整状态 $s_T = \{p, r\}$ 下奖励模型的输出。价值函数的目标函数可以写为
 
-$
-\begin{align}
+$$
 L(\gamma) = \mathbb{E}_t \left[(V_\gamma(s_t) - \text{sg}(R_\phi(s_T)))^2\right],
-\end{align}
-$
+$$
 
 其中 $\text{sg}$ 表示停止梯度操作。正如我们所见，价值函数通过简单的L2损失与奖励模型的分数进行训练。
 
@@ -155,19 +147,15 @@ $
 #### 回到GAE
 有了价值函数 $V_\gamma$，我们现在有了一种方法来预测部分状态的奖励。现在让我们继续讨论GAE，它正如之前提到的，计算多步TD目标：
 
-$
-\begin{align}
+$$
 A^{\text{GAE}}_K = \delta_0 + \lambda \delta_1 + \lambda^2 \delta_2 ... + (\lambda)^{K-1} \delta_{K-1} = \sum^{K-1}_{t=0} (\lambda)^t \delta_t,
-\end{align}
-$
+$$
 
 其中 $K$ 表示TD步数，且 $K<T$（因为显然你不能计算超出轨迹长度的TD）。$\delta_t$ 表示第 $t$ 步的TD误差，计算公式为：
 
-$
-\begin{align}
+$$
 \delta_t = V_\gamma(s_{t+1}) - V_\gamma(s_t)
-\end{align}
-$
+$$
 
 简而言之，TD误差计算了一个时间步的预期总奖励之间的差异，而 $A_{K}^{\text{GAE}}$ 通过计算 $K$ 步内的单步TD误差的聚合来估计优势。GAE公式中的 $\lambda$ 控制了方差和偏差之间的权衡：当 $\lambda =0$ 时，GAE简化为单步TD；当 $\lambda=1$ 时，GAE变为MC。
 
@@ -183,19 +171,15 @@ PPO目标函数有几个组成部分，即1）剪裁的替代目标，2）熵奖
 
 这是我们最大化$A_K^{\text{GAE}}$的地方，因此LLM预测的每个token都能最大化奖励（或者根据之前的优势定义，LLM预测的每个token都应该比其平均预测好得多）。剪裁的替代目标通过概率比率$c_t(\pi_\theta)$来约束策略更新：
 
-$
-\begin{align}
+$$
 L^{\text{clip}}(\theta) = \mathbb{E}_t \left[ \min(c_t(\pi_\theta)A^{GAE}_t, \text{clip}(c_t(\pi_\theta),1-\epsilon, 1+\epsilon)A^{GAE}_t)\right],
-\end{align}
-$
+$$
 
 其中$\epsilon$控制剪裁范围，$c_t(\pi_\theta)$是在给定累积状态$s_t$下，预测特定token $a_t$的概率比率，更新前后分别为：
 
-$
-\begin{align}
+$$
 c_t(\pi_\theta) = \frac{\pi_\theta (a_t | s_t)}{\pi_{\theta_{\text{old}}} (a_t | s_t)}.
-\end{align}
-$
+$$
 
 直觉上的理解就是：即使有了“分数线”，新的问题也可能出现。例如：如果我在一次考试中突然突破并取得95或100分，爸爸可能会给我丰厚的奖励，促使我在下次考试前采取过于激进的学习模式。我的成绩可能会在极端之间波动（95分和60分），导致巨大的奖励波动。
 
@@ -216,11 +200,9 @@ $
 
 #### 2. KL散度惩罚
 此外，我们还有KL散度惩罚，它防止当前策略$\theta$与我们在微调时所基于的原始模型$\theta_{\text{orig}}$偏离太远：
-$
-\begin{align}
+$$
 \text{KL}(\theta) = \mathbb{E}_{s_t} \left[ \mathbb{D}_{\text{KL}}(\pi_{\theta\text{orig}}(\cdot | s_t) || \pi_{\theta}(\cdot | s_t)) \right]
-\end{align}
-$
+$$
 
 KL散度通过在序列和批次上取平均来简单估计。
 
@@ -247,11 +229,9 @@ kl_penalty = kl_div.mean()  # 在序列和批次上取平均
 #### 3. 熵奖励
 熵奖励通过惩罚低熵来鼓励LLM的生成进行探索：
 
-$
-\begin{align}
+$$
 H(\theta) = - \mathbb{E}_{a_t} [\log \pi_\theta (a_t | s_t)].
-\end{align}
-$
+$$
 
 **伪代码：**
 
@@ -267,9 +247,9 @@ entropy_bonus = entropy.mean()  # 对序列和批次取平均
 #### 最后，PPO 目标函数
 给定上述三个项，除了价值函数的 MSE 损失，PPO 目标函数定义如下：
 
-$
+$$
 \mathcal{L}_{\text{PPO}}(\theta, \gamma) = \underbrace{\mathcal{L}_{\text{clip}}(\theta)}_{\text{最大化奖励}} + \underbrace{w_1 H(\theta)}_{\text{最大化熵}} - \underbrace{w_2 \text{KL}(\theta)}_{\text{惩罚KL散度}} - \underbrace{w_3 \mathcal{L(}\gamma)}_{\text{优化价值函数}}
-$
+$$
 
 该目标函数中不同项的总结如下：
 
@@ -288,11 +268,9 @@ $
 1. 对于每个提示$p$，从LLM策略$\pi_\theta$中抽取一组$N$个响应$\mathcal{G}=\{r_1, r_2,...r_N\}$；
 2. 使用奖励模型$R_\phi$计算每个响应的奖励$\{R_\phi(r_1),R_\phi(r_2),...R_\phi(r_N)\}$；
 3. 计算每个响应的组内归一化优势：
-$
-\begin{align}
+$$
 A_i = \frac{R_\phi(r_i) - \text{mean}(\mathcal{G})}{\text{std}(\mathcal{G})},
-\end{align}
-$
+$$
 其中$\text{mean}(\mathcal{G})$和$\text{std}(\mathcal{G})$分别表示组内的均值和标准差。
 
 在GRPO中，优势近似为每个响应在其响应组内的归一化奖励。这消除了使用价值函数计算每步奖励的需求，更不用说数学上的简单和优雅了。这不禁让人问——为什么我们没有早点这样做？
@@ -314,11 +292,9 @@ $$
 
 然后，加上KL惩罚项，最终的GRPO目标可以写为：
 
-$
-\begin{align}
-\mathcal{L}_{\text{GRPO}}(\theta) &= \underbrace{\mathcal{L}_{\text{clip}}(\theta)}_{\text{最大化奖励}} - \underbrace{w_1\mathbb{D}_{\text{KL}}(\pi_\theta || \pi_{\text{orig}})}_{\text{惩罚KL散度}}
-\end{align}
-$
+$$
+\mathcal{L}_{\text{GRPO}}(\theta) = \underbrace{\mathcal{L}_{\text{clip}}(\theta)}_{\text{最大化奖励}} - \underbrace{w_1\mathbb{D}_{\text{KL}}(\pi_\theta || \pi_{\text{orig}})}_{\text{惩罚KL散度}}
+$$
 
 # 关于R1的更多思考：残酷的简洁
 最后，关于R1再多说几句。
