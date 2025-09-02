@@ -1,0 +1,306 @@
+<?xml version="1.0" encoding="utf-8" standalone="yes"?><rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom"><channel><title>LLM on 光头的自留地</title><link>https://qychen2001.github.io/blog/tags/llm/</link><description>Recent content in LLM on 光头的自留地</description><generator>Hugo -- gohugo.io</generator><language>zh-cn</language><lastBuildDate>Fri, 28 Mar 2025 00:00:00 +0000</lastBuildDate><atom:link href="https://qychen2001.github.io/blog/tags/llm/index.xml" rel="self" type="application/rss+xml"/><item><title>详解PPO与GRPO</title><link>https://qychen2001.github.io/blog/p/%E8%AF%A6%E8%A7%A3ppo%E4%B8%8Egrpo/</link><pubDate>Fri, 28 Mar 2025 00:00:00 +0000</pubDate><guid>https://qychen2001.github.io/blog/p/%E8%AF%A6%E8%A7%A3ppo%E4%B8%8Egrpo/</guid><description>&lt;blockquote&gt;
+&lt;p&gt;本文是&lt;a class="link" href="https://yugeten.github.io/posts/2025/01/ppogrpo/" target="_blank" rel="noopener"
+&gt;《A vision researcher’s guide to some RL stuff: PPO &amp;amp; GRPO》&lt;/a&gt;的中文翻译，并添加了必要的注释与修订，使得更容易理解。这篇博客是我认为把PPO讲的最清楚的博客了。此外，还会添加部分&lt;a class="link" href="https://huggingface.co/blog/NormalUhr/grpo" target="_blank" rel="noopener"
+&gt;《DeepSeek-R1 Dissection: Understanding PPO &amp;amp; GRPO Without Any Prior Reinforcement Learning Knowledge》&lt;/a&gt;的内容，以辅助理解。&lt;/p&gt;&lt;/blockquote&gt;
+&lt;h2 id="llm的预训练与后训练"&gt;LLM的预训练与后训练
+&lt;/h2&gt;&lt;p&gt;LLM的训练可以分为预训练和后训练两个阶段：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;
+&lt;p&gt;预训练：这是经典的“向模型投入数据”阶段，模型通过大规模网络数据进行训练，以进行下一个词预测；&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;后训练：这是我们尝试提高模型推理能力的阶段。通常后训练分为两个阶段，即：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;阶段1：SFT（监督微调）：&lt;/strong&gt; 顾名思义，我们首先通过在少量高质量专家推理数据上微调LLM来进行监督学习；可以理解为指令跟随、问答和/或思维链。希望到这个训练阶段结束时，模型已经学会了如何模仿专家。如果我们有无限量的高质量专家数据，这显然是理想的学习方式，可惜并没有。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;阶段2：RLHF（从人类反馈中进行强化学习）：&lt;/strong&gt; 人类专家推理数据不足？这就是强化学习大放异彩的地方。RLHF 利用人类反馈来训练奖励模型，然后通过强化学习引导大语言模型的学习。这种方法使模型与人类复杂的偏好保持一致。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;/ol&gt;
+&lt;h2 id="deepseek的超高效后训练"&gt;DeepSeek的超高效后训练
+&lt;/h2&gt;&lt;p&gt;值得注意的是，DeepSeek R1技术报告中一个最令人惊讶的地方是，他们的R1-zero模型完全跳过了SFT部分，直接在基础模型（DeepSeek V3）上应用RL。这样做有几个好处：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;计算效率：&lt;/strong&gt; 跳过后训练的一个阶段带来了计算效率；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;开放式学习：&lt;/strong&gt; 允许模型通过探索“自我进化”推理能力；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;对齐：&lt;/strong&gt; 避免了由人工收集的SFT数据引入的偏见。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;&lt;strong&gt;注意：&lt;/strong&gt; 虽然看到有人通过跳过后训练的一个阶段来节省计算资源似乎是一个“显而易见”的想法，但我怀疑如果没有一个非常好的基础模型，你无法做到这一点。&lt;/p&gt;
+&lt;p&gt;但他们并没有止步于此！DeepSeek还通过引入GRPO来替代PPO，使RLHF部分更加高效，这消除了对单独的价值函数（通常与策略模型大小相当）的需求，将内存和计算开销减少了约50%。为了了解他们为什么以及如何做到这一点，并满足我们自己的求知欲，现在让我们来看看RLHF的确切做法以及这些算法的作用。&lt;/p&gt;
+&lt;h2 id="rlhf"&gt;RLHF
+&lt;/h2&gt;&lt;p&gt;让我们将RLHF的工作流程分解为步骤：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;步骤1&lt;/strong&gt;：对于每个提示，从模型中采样多个响应；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;步骤2&lt;/strong&gt;：人类根据质量对这些输出进行排序；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;步骤3&lt;/strong&gt;：训练一个&lt;strong&gt;奖励模型&lt;/strong&gt;，以在给定任何模型响应时，预测人类偏好/排序；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;步骤4&lt;/strong&gt;：使用&lt;strong&gt;RL（例如PPO、GRPO）&lt;/strong&gt; 来微调模型，以最大化奖励模型的分数。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;正如我们所见，这个过程相对简单，有两个可学习的组件，即&lt;strong&gt;奖励模型&lt;/strong&gt;和&lt;strong&gt;RL&lt;/strong&gt;。现在让我们更详细地探讨每个组件。&lt;/p&gt;
+&lt;h2 id="奖励模型"&gt;奖励模型
+&lt;/h2&gt;&lt;p&gt;奖励模型实际上是自动化工作的最重要组成部分：现实情况是，我们不可能让人类对模型的所有输出进行排序。一种节省成本的方法是让标注员对一小部分LLM输出进行评分，然后&lt;strong&gt;训练一个模型来预测这些标注员的偏好&lt;/strong&gt;——这就是奖励模型的作用。&lt;/p&gt;
+&lt;p&gt;具体来说，我们用$R_\phi$表示可学习的奖励模型。给定一个提示$p$，LLM生成$N$个响应${r_1, r_2,&amp;hellip;r_N}$。然后根据人类评分者的偏好，响应$r_i$优于$r_j$，奖励模型通过最小化以下目标函数进行训练：&lt;/p&gt;
+$$
+\mathcal{L}(\phi) = -\log \sigma(R_\phi(p, r_i) - R_\phi(p, r_j)),
+$$&lt;p&gt;
+其中$\sigma$表示sigmoid函数。&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;旁注&lt;/strong&gt;：该目标函数源自&lt;strong&gt;Bradley-Terry模型&lt;/strong&gt;，该模型定义了评分者偏好$r_i$而非$r_j$的概率为：&lt;/p&gt;
+$$
+P(r_i \succ r_j) = \frac{\exp\big(R_\phi(p, r_i)\big)}{\exp\big(R_\phi(p, r_i)\big) + \exp\big(R_\phi(p, r_j)\big)}.$$&lt;p&gt;对该概率取负对数似然得到上述损失函数$\mathcal{L}(\phi)$。sigmoid函数$\sigma$可以对Bradley-Terry整理后得到。&lt;/p&gt;&lt;/blockquote&gt;
+&lt;h2 id="ppo"&gt;PPO
+&lt;/h2&gt;&lt;blockquote&gt;
+&lt;p&gt;这部分内容是为那些对PPO感到好奇的读者准备的，如果你的目标是理解GRPO，那么你其实不需要理解这部分内容。我只能说，虽然我终于理解PPO的工作原理让我感到非常高兴，但当我意识到GRPO比PPO简单得多时，我感到一种极大的解脱感。所以，如果你准备好体验一次情感的过山车——让我们深入探讨吧。&lt;/p&gt;&lt;/blockquote&gt;
+&lt;p&gt;首先，一个高层次的概述。PPO代表近端策略优化，它需要以下组件：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;策略模型 ($\pi_\theta$)&lt;/strong&gt;：经过预训练或SFT的LLM；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;奖励模型 ($R_\phi$)&lt;/strong&gt;：一个经过训练并冻结的网络，它为给定提示的&lt;strong&gt;完整响应&lt;/strong&gt;提供标量奖励；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;价值函数 ($V_\gamma$)&lt;/strong&gt;：它是一个可学习的网络，接受给定提示的&lt;strong&gt;部分响应&lt;/strong&gt;并预测标量奖励。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;一旦我们了解了工作流程，每个组件的作用就会变得更加清晰，该流程包含五个阶段：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;生成响应&lt;/strong&gt;：LLM为给定提示生成多个响应；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;评分响应&lt;/strong&gt;：奖励模型为每个响应分配奖励；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;计算优势&lt;/strong&gt;：使用GAE（广义优势估计）计算优势（稍后会详细介绍，它用于训练LLM）；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;优化策略&lt;/strong&gt;：通过优化总目标来更新LLM；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;更新价值函数&lt;/strong&gt;：训练价值函数，使其更好地预测给定部分响应的奖励。&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;现在让我们详细看看这些阶段/组件，然后看看它们是如何结合在一起的。&lt;/p&gt;
+&lt;h3 id="术语状态和动作"&gt;术语：状态和动作
+&lt;/h3&gt;&lt;p&gt;在我们继续之前，再介绍一些强化学习的术语。在本节的讨论中，我们将使用术语&lt;strong&gt;状态&lt;/strong&gt;，记为$s_t$，以及&lt;strong&gt;动作&lt;/strong&gt;，记为$a_t$。需要注意的是，这里的下标$t$用于表示&lt;strong&gt;token级别&lt;/strong&gt;的状态和动作；相比之下，之前我们在定义提示$p$和响应$r_i$时，下标$i$用于表示&lt;strong&gt;实例级别&lt;/strong&gt;的响应。&lt;/p&gt;
+&lt;p&gt;为了更清楚地说明这一点，假设我们给LLM一个提示$p$。然后LLM开始逐个token地生成一个长度为$T$的响应$r_i$：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;$t=0$：我们的状态只是提示，即$s_0 = {p}$，第一个动作$a_0$是LLM生成的第一个词token；&lt;/li&gt;
+&lt;li&gt;$t=1$：状态变为$s_1 = {p, a_0}$，因为LLM在基于状态生成下一个动作$a_1$；
+&amp;hellip;&lt;/li&gt;
+&lt;li&gt;$t=T-1$：状态为$s_{T-1} = {p, a_{0:T-2}}$，LLM生成最后一个动作$a_{T-1}$。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;所有动作串联在一起形成一个响应，即$r_i = {a_0, a_1,&amp;hellip;a_{T-1}}$。&lt;/p&gt;
+&lt;h3 id="广义优势估计-gae"&gt;广义优势估计 (GAE)
+&lt;/h3&gt;&lt;p&gt;我们的策略更新是为了优化&lt;strong&gt;优势&lt;/strong&gt;——直观地说，它定义了在状态 $s_t$（即提示 + 到目前为止生成的词）下，&lt;strong&gt;特定动作&lt;/strong&gt; $a_t$（即词）相对于策略将采取的&lt;strong&gt;平均动作&lt;/strong&gt;的优越程度。形式上：&lt;/p&gt;
+$$
+A_t = Q(s_t, a_t) - V(s_t)
+$$&lt;p&gt;其中 $Q(s_t, a_t)$ 是在状态 $s_t$ 下采取特定动作 $a_t$ 的预期累积奖励，而 $V(s_t)$ 是策略在状态 $s_t$ 下采取平均动作的预期累积奖励。&lt;/p&gt;
+&lt;p&gt;有两种主要的方法来估计这种优势，每种方法都有其权衡，即：&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;&lt;strong&gt;蒙特卡洛 (MC)&lt;/strong&gt;：使用完整轨迹的奖励（即完整响应）。这种方法由于稀疏奖励而具有高方差——从LLM中获取足够多的样本以使用MC进行优化是昂贵的，但它确实具有低偏差，因为我们可以准确地建模奖励；&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;时序差分 (TD)&lt;/strong&gt;：使用一步轨迹奖励（即测量在给定提示下刚刚生成的词的好坏）。通过这样做，我们可以在token级别上计算奖励，这显著降低了方差，但与此同时，偏差上升了，因为我们无法像准确预测部分生成的响应的最终奖励那样准确。&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;这就是GAE的用武之地——它被提出来&lt;strong&gt;通过多步TD来平衡偏差和方差&lt;/strong&gt;。然而，回想一下我们之前提到的，如果响应不完整，奖励模型将返回0：我们如何在不知道生成一个词之前和之后的奖励变化的情况下计算TD？因此，我们引入了一个模型来完成这项工作，我们称之为“价值函数”。&lt;/p&gt;
+&lt;h4 id="为什么需要gae"&gt;为什么需要GAE
+&lt;/h4&gt;&lt;p&gt;为了使这些概念更加直观，让我们打个比方：把RL训练过程想象成一个小学生考试的场景。我们（正在训练的模型）就像学生，努力争取高分，给我们打分的老师就像奖励模型，而我们根据成绩获得零花钱的父母则类似于价值函数。接下来，我们将逐步探讨为什么仅靠最终分数是不够的，也就是为什么需要GAE。&lt;/p&gt;
+&lt;p&gt;假设我和我的弟弟在同一所小学的同一个班级。老师给我们的考试打分，给出“绝对分数”。我通常得分在80分以上，而我的弟弟经常得30分左右。然后我们直接把这些分数拿给爸爸，要求零花钱——这意味着我们的“奖励”就是我们的原始考试分数。谁的分数高，谁就能得到更多的零花钱。&lt;/p&gt;
+&lt;p&gt;乍一看，这似乎挺好。但很快就会出现两个大问题：&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;strong&gt;不公平：&lt;/strong&gt; 如果我弟弟通过大量努力从30分提高到60分，他仍然远远不及我通常的80分以上。他没有得到应有的鼓励。&lt;/p&gt;
+&lt;/li&gt;
+&lt;li&gt;
+&lt;p&gt;&lt;strong&gt;不稳定：&lt;/strong&gt; 我自己追求更高的分数可能会导致极端的学习方法（例如，不分昼夜地死记硬背，熬夜到很晚）。有时我可能得95分，其他时候只有60分，因此我的分数以及由此产生的奖励信号会剧烈波动。&lt;/p&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;结果是，使用绝对分数作为奖励会导致奖励的巨大波动，而我弟弟最终会觉得不值得通过小步改善来提高。&lt;/p&gt;
+&lt;p&gt;在强化学习中，如果我们简单地只优化最终奖励，我们可能会遇到高方差和对部分改进激励不足的问题。换句话说，策略缺乏一个与其当前水平相匹配的基线，这阻碍了训练效率。&lt;/p&gt;
+&lt;p&gt;认识到这个问题后，爸爸意识到“这不只是关于绝对分数，而是关于你相对于当前水平的进步有多大。”&lt;/p&gt;
+&lt;p&gt;所以他决定：
+将我的“预测分数线”设为80分，弟弟的设为40分。如果我们考试超过这些分数线，我们就能得到更多的零花钱；如果没有，我们得到的就很少甚至没有。&lt;/p&gt;
+&lt;p&gt;因此，如果弟弟努力学习，从30分跃升到60分，他就比他的“预测分数线”高出20分，这意味着丰厚的奖励。与此同时，如果我仍然保持在80分左右，增量的收益较小，所以我未必会比他得到更多。这种安排鼓励每个人从自己的基线开始进步，而不是单纯比较绝对分数。&lt;/p&gt;
+&lt;h4 id="价值函数"&gt;价值函数
+&lt;/h4&gt;&lt;p&gt;价值函数经过训练，能够&lt;strong&gt;仅根据部分状态预测最终奖励&lt;/strong&gt;，从而我们可以计算TD。训练价值函数 $V_\gamma$ 相当简单：&lt;/p&gt;
+&lt;p&gt;给定一个部分状态 $s_t$，我们希望预测在完整状态 $s_T = {p, r}$ 下奖励模型的输出。价值函数的目标函数可以写为&lt;/p&gt;
+$$
+L(\gamma) = \mathbb{E}_t \left[(V_\gamma(s_t) - \text{sg}(R_\phi(s_T)))^2\right],
+$$&lt;p&gt;其中 $\text{sg}$ 表示停止梯度操作。正如我们所见，价值函数通过简单的L2损失与奖励模型的分数进行训练。&lt;/p&gt;
+&lt;p&gt;你可能会注意到，尽管奖励模型 $R_\phi$ 在PPO之前已经训练并冻结，价值函数却与LLM一起训练，尽管它的任务也只是预测奖励。这是因为价值函数必须根据&lt;strong&gt;当前策略&lt;/strong&gt;估计部分响应的奖励；因此，它必须与LLM一起更新，以避免其预测变得过时和错位。&lt;/p&gt;
+&lt;p&gt;直觉上的理解就是：分数线不会一成不变，他需要随着我们的进步不断“重新调整”。如果弟弟的水平提升到60分左右，那么40分的基线就不再公平。同样，如果我稳定在85分左右，爸爸可能也需要调整我的分数线。换句话说，爸爸也需要学习，特别是关于我和弟弟进步的速度。&lt;/p&gt;
+&lt;h4 id="回到gae"&gt;回到GAE
+&lt;/h4&gt;&lt;p&gt;有了价值函数 $V_\gamma$，我们现在有了一种方法来预测部分状态的奖励。现在让我们继续讨论GAE，它正如之前提到的，计算多步TD目标：&lt;/p&gt;
+$$
+A^{\text{GAE}}_K = \delta_0 + \lambda \delta_1 + \lambda^2 \delta_2 ... + (\lambda)^{K-1} \delta_{K-1} = \sum^{K-1}_{t=0} (\lambda)^t \delta_t,
+$$&lt;p&gt;其中 $K$ 表示TD步数，且 $K&amp;lt;T$（因为显然你不能计算超出轨迹长度的TD）。$\delta_t$ 表示第 $t$ 步的TD误差，计算公式为：&lt;/p&gt;
+$$
+\delta_t = V_\gamma(s_{t+1}) - V_\gamma(s_t)
+$$&lt;p&gt;简而言之，TD误差计算了一个时间步的预期总奖励之间的差异，而 $A_{K}^{\text{GAE}}$ 通过计算 $K$ 步内的单步TD误差的聚合来估计优势。GAE公式中的 $\lambda$ 控制了方差和偏差之间的权衡：当 $\lambda =0$ 时，GAE简化为单步TD；当 $\lambda=1$ 时，GAE变为MC。&lt;/p&gt;
+&lt;p&gt;在RLHF中，我们希望最大化这个优势项，从而最大化LLM生成的每个token的奖励。&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;旁注&lt;/strong&gt;：为了简化，我在这里省略了一些细节。原本在GAE中还有一个折扣因子 $\eta$：&lt;/p&gt;
+$$A^{\text{GAE}}_K = \sum^{K-1}_{t=0} (\lambda\eta)^t \delta_t,$$&lt;p&gt;它也用于TD误差 $\delta_t$，并且还有一个额外的奖励项&lt;/p&gt;
+$$\delta_t = R_\phi(s_t) + \eta V_\gamma(s_{t+1}) - V_\gamma(s_t).$$&lt;p&gt;
+但由于我们几乎总是有 $\eta=1$，并且对于 $t&amp;lt;T$ 的情况 $R_\phi(s_t)=0$，我为了简化而省略了这些项。&lt;/p&gt;&lt;/blockquote&gt;
+&lt;h3 id="ppo目标函数"&gt;PPO目标函数
+&lt;/h3&gt;&lt;p&gt;PPO目标函数有几个组成部分，即1）剪裁的替代目标，2）熵奖励，3）KL惩罚。&lt;/p&gt;
+&lt;h4 id="1-剪裁的替代目标"&gt;1. 剪裁的替代目标
+&lt;/h4&gt;&lt;p&gt;这是我们最大化$A_K^{\text{GAE}}$的地方，因此LLM预测的每个token都能最大化奖励（或者根据之前的优势定义，LLM预测的每个token都应该比其平均预测好得多）。剪裁的替代目标通过概率比率$c_t(\pi_\theta)$来约束策略更新：&lt;/p&gt;
+$$
+L^{\text{clip}}(\theta) = \mathbb{E}_t \left[ \min(c_t(\pi_\theta)A^{GAE}_t, \text{clip}(c_t(\pi_\theta),1-\epsilon, 1+\epsilon)A^{GAE}_t)\right],
+$$&lt;p&gt;其中$\epsilon$控制剪裁范围，$c_t(\pi_\theta)$是在给定累积状态$s_t$下，预测特定token $a_t$的概率比率，更新前后分别为：&lt;/p&gt;
+$$
+c_t(\pi_\theta) = \frac{\pi_\theta (a_t | s_t)}{\pi_{\theta_{\text{old}}} (a_t | s_t)}.
+$$&lt;p&gt;直觉上的理解就是：即使有了“分数线”，新的问题也可能出现。例如：如果我在一次考试中突然突破并取得95或100分，爸爸可能会给我丰厚的奖励，促使我在下次考试前采取过于激进的学习模式。我的成绩可能会在极端之间波动（95分和60分），导致巨大的奖励波动。&lt;/p&gt;
+&lt;p&gt;因此，爸爸决定适度调整我在每一步可以更新学习策略的幅度。他不会因为一次好成绩就给我成倍增加零花钱。如果他给得太多，我可能会走向极端的探索；如果给得太少，我又会失去动力。所以他必须找到一个平衡点。&lt;/p&gt;
+&lt;p&gt;简单来说，得到 100 分会获得额外奖励，但爸爸设定了一个“天花板”，以防我过于放纵。他会在下次考试中重新评估，采取稳定的方法而不是加剧极端波动。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;具体示例&lt;/strong&gt;:&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;假设LLM为单词&lt;code&gt;unlimited&lt;/code&gt;分配了以下概率：
+&lt;ul&gt;
+&lt;li&gt;&lt;em&gt;&lt;strong&gt;更新前&lt;/strong&gt;&lt;/em&gt;：0.1，&lt;/li&gt;
+&lt;li&gt;&lt;em&gt;&lt;strong&gt;更新后&lt;/strong&gt;&lt;/em&gt;：0.3。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;那么概率比率 $c_t=0.3/0.1=3$；&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;如果我们取 $\epsilon=0.2$，$c_t$ 被截断为1.2；&lt;/li&gt;
+&lt;li&gt;最终的截断代理损失为 $L^{\text{clip}}(\pi_\theta) = 1.2A_K^{\text{GAE}}$。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;你可以将截断视为防止过度自信的一种方法。如果没有截断，一个较大的 $A_K^{\text{GAE}}$ 可能会导致策略过度承诺于某个动作。&lt;/p&gt;
+&lt;h4 id="2-kl散度惩罚"&gt;2. KL散度惩罚
+&lt;/h4&gt;&lt;p&gt;此外，我们还有KL散度惩罚，它防止当前策略$\theta$与我们在微调时所基于的原始模型$\theta_{\text{orig}}$偏离太远：
+&lt;/p&gt;
+$$
+\text{KL}(\theta) = \mathbb{E}_{s_t} \left[ \mathbb{D}_{\text{KL}}(\pi_{\theta\text{orig}}(\cdot | s_t) || \pi_{\theta}(\cdot | s_t)) \right]
+$$&lt;p&gt;KL散度通过在序列和批次上取平均来简单估计。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;伪代码:&lt;/strong&gt;&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt; 1
+&lt;/span&gt;&lt;span class="lnt"&gt; 2
+&lt;/span&gt;&lt;span class="lnt"&gt; 3
+&lt;/span&gt;&lt;span class="lnt"&gt; 4
+&lt;/span&gt;&lt;span class="lnt"&gt; 5
+&lt;/span&gt;&lt;span class="lnt"&gt; 6
+&lt;/span&gt;&lt;span class="lnt"&gt; 7
+&lt;/span&gt;&lt;span class="lnt"&gt; 8
+&lt;/span&gt;&lt;span class="lnt"&gt; 9
+&lt;/span&gt;&lt;span class="lnt"&gt;10
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-python" data-lang="python"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 计算原始策略和当前策略/模型之间的KL散度&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;logits_orig&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;original_model&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;states&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;# 原始模型的logits&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;logits_current&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;current_model&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;states&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt; &lt;span class="c1"&gt;# 当前模型的logits&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;probs_orig&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;F&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;softmax&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;logits_orig&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;dim&lt;/span&gt;&lt;span class="o"&gt;=-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;log_probs_orig&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;F&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;log_softmax&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;logits_orig&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;dim&lt;/span&gt;&lt;span class="o"&gt;=-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;log_probs_current&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;F&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;log_softmax&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;logits_current&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;dim&lt;/span&gt;&lt;span class="o"&gt;=-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;kl_div&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;probs_orig&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;log_probs_orig&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt; &lt;span class="n"&gt;log_probs_current&lt;/span&gt;&lt;span class="p"&gt;))&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;sum&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;dim&lt;/span&gt;&lt;span class="o"&gt;=-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;kl_penalty&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;kl_div&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;mean&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="c1"&gt;# 在序列和批次上取平均&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;p&gt;直觉上的理解就是：如果我只专注于高分，我可能会采取一些可疑的手段，比如作弊或威胁老师给我满分。显然，这违反了所有规则。在LLM中，类似的情况是生成有害或伪造的内容以人为地提升某些奖励指标。&lt;/p&gt;
+&lt;p&gt;因此，爸爸还设定了一个额外的规则：无论如何，你都不能偏离你最初、诚实的学习方法太远。如果你偏离了基线太多，即使分数很高，我也会取消你的资格并扣发你的零用钱。&lt;/p&gt;
+&lt;p&gt;这类似于在学期初（即初始监督微调之后）标记一条“参考线”。你不能偏离这条原始策略太远，否则会面临惩罚。&lt;/p&gt;
+&lt;h4 id="3-熵奖励"&gt;3. 熵奖励
+&lt;/h4&gt;&lt;p&gt;熵奖励通过惩罚低熵来鼓励LLM的生成进行探索：&lt;/p&gt;
+$$
+H(\theta) = - \mathbb{E}_{a_t} [\log \pi_\theta (a_t | s_t)].
+$$&lt;p&gt;&lt;strong&gt;伪代码：&lt;/strong&gt;&lt;/p&gt;
+&lt;div class="highlight"&gt;&lt;div class="chroma"&gt;
+&lt;table class="lntable"&gt;&lt;tr&gt;&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code&gt;&lt;span class="lnt"&gt;1
+&lt;/span&gt;&lt;span class="lnt"&gt;2
+&lt;/span&gt;&lt;span class="lnt"&gt;3
+&lt;/span&gt;&lt;span class="lnt"&gt;4
+&lt;/span&gt;&lt;span class="lnt"&gt;5
+&lt;/span&gt;&lt;span class="lnt"&gt;6
+&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;
+&lt;td class="lntd"&gt;
+&lt;pre tabindex="0" class="chroma"&gt;&lt;code class="language-python" data-lang="python"&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="c1"&gt;# 计算当前策略的熵&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;probs_current&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;F&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;softmax&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;logits_current&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;dim&lt;/span&gt;&lt;span class="o"&gt;=-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;log_probs_current&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;F&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;log_softmax&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;logits_current&lt;/span&gt;&lt;span class="p"&gt;,&lt;/span&gt; &lt;span class="n"&gt;dim&lt;/span&gt;&lt;span class="o"&gt;=-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;entropy&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="o"&gt;-&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;probs_current&lt;/span&gt; &lt;span class="o"&gt;*&lt;/span&gt; &lt;span class="n"&gt;log_probs_current&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;sum&lt;/span&gt;&lt;span class="p"&gt;(&lt;/span&gt;&lt;span class="n"&gt;dim&lt;/span&gt;&lt;span class="o"&gt;=-&lt;/span&gt;&lt;span class="mi"&gt;1&lt;/span&gt;&lt;span class="p"&gt;)&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;span class="line"&gt;&lt;span class="cl"&gt;&lt;span class="n"&gt;entropy_bonus&lt;/span&gt; &lt;span class="o"&gt;=&lt;/span&gt; &lt;span class="n"&gt;entropy&lt;/span&gt;&lt;span class="o"&gt;.&lt;/span&gt;&lt;span class="n"&gt;mean&lt;/span&gt;&lt;span class="p"&gt;()&lt;/span&gt; &lt;span class="c1"&gt;# 对序列和批次取平均&lt;/span&gt;
+&lt;/span&gt;&lt;/span&gt;&lt;/code&gt;&lt;/pre&gt;&lt;/td&gt;&lt;/tr&gt;&lt;/table&gt;
+&lt;/div&gt;
+&lt;/div&gt;&lt;h4 id="最后ppo-目标函数"&gt;最后，PPO 目标函数
+&lt;/h4&gt;&lt;p&gt;给定上述三个项，除了价值函数的 MSE 损失，PPO 目标函数定义如下：&lt;/p&gt;
+$$
+\mathcal{L}_{\text{PPO}}(\theta, \gamma) = \underbrace{\mathcal{L}_{\text{clip}}(\theta)}_{\text{最大化奖励}} + \underbrace{w_1 H(\theta)}_{\text{最大化熵}} - \underbrace{w_2 \text{KL}(\theta)}_{\text{惩罚KL散度}} - \underbrace{w_3 \mathcal{L(}\gamma)}_{\text{优化价值函数}}
+$$&lt;p&gt;该目标函数中不同项的总结如下：&lt;/p&gt;
+&lt;table&gt;
+&lt;thead&gt;
+&lt;tr&gt;
+&lt;th&gt;&lt;strong&gt;项&lt;/strong&gt;&lt;/th&gt;
+&lt;th&gt;&lt;strong&gt;目的&lt;/strong&gt;&lt;/th&gt;
+&lt;/tr&gt;
+&lt;/thead&gt;
+&lt;tbody&gt;
+&lt;tr&gt;
+&lt;td&gt;$\mathcal{L}_{\text{clip}}(\theta)$&lt;/td&gt;
+&lt;td&gt;最大化高优势动作的奖励（裁剪以避免不稳定性）。&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;$H(\theta)$&lt;/td&gt;
+&lt;td&gt;最大化熵以鼓励探索。&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;$\text{KL}(\theta)$&lt;/td&gt;
+&lt;td&gt;惩罚与参考策略的偏差（稳定性）。&lt;/td&gt;
+&lt;/tr&gt;
+&lt;tr&gt;
+&lt;td&gt;$\mathcal{L}(\gamma)$&lt;/td&gt;
+&lt;td&gt;最小化价值函数预测误差（L2 损失）。&lt;/td&gt;
+&lt;/tr&gt;
+&lt;/tbody&gt;
+&lt;/table&gt;
+&lt;h2 id="grpo"&gt;GRPO
+&lt;/h2&gt;&lt;p&gt;现在我们对PPO有了很好的理解，理解GRPO就非常简单了，关键的区别在于两种算法如何估计优势$A$：与PPO通过价值函数估计优势不同，GRPO通过使用相同的提示从LLM中采样多个响应来实现这一点。&lt;/p&gt;
+&lt;p&gt;&lt;strong&gt;工作流程：&lt;/strong&gt;&lt;/p&gt;
+&lt;ol&gt;
+&lt;li&gt;对于每个提示$p$，从LLM策略$\pi_\theta$中抽取一组$N$个响应$\mathcal{G}={r_1, r_2,&amp;hellip;r_N}$；&lt;/li&gt;
+&lt;li&gt;使用奖励模型$R_\phi$计算每个响应的奖励${R_\phi(r_1),R_\phi(r_2),&amp;hellip;R_\phi(r_N)}$；&lt;/li&gt;
+&lt;li&gt;计算每个响应的组内归一化优势：
+$$
+A_i = \frac{R_\phi(r_i) - \text{mean}(\mathcal{G})}{\text{std}(\mathcal{G})},
+$$
+其中$\text{mean}(\mathcal{G})$和$\text{std}(\mathcal{G})$分别表示组内的均值和标准差。&lt;/li&gt;
+&lt;/ol&gt;
+&lt;p&gt;在GRPO中，优势近似为每个响应在其响应组内的归一化奖励。这消除了使用价值函数计算每步奖励的需求，更不用说数学上的简单和优雅了。这不禁让人问——为什么我们没有早点这样做？&lt;/p&gt;
+&lt;blockquote&gt;
+&lt;p&gt;&lt;strong&gt;更新&lt;/strong&gt;：来自&lt;a class="link" href="https://x.com/him_sahni" target="_blank" rel="noopener"
+&gt;@him_sahni&lt;/a&gt;的一些见解，他“在前世做过强化学习”：&lt;strong&gt;“为什么没有人尝试过GRPO”的原因是——我们确实尝试过&lt;/strong&gt;。在强化学习中，你通过减去一个基线（通常是几个轨迹的平均奖励）来更新策略以减少方差。事实上，理论表明理想的基线是从状态开始预期的未来总奖励，通常称为“价值”。使用价值函数作为基线的方法被称为actor-critic方法，而PPO是其稳定版本。现在，在传统的强化学习中，基线可以是当前状态的任何函数，传统上只是单个批次中轨迹的奖励；在GRPO中，这个基线是针对每个提示生成的1000个样本计算的，这是新颖的。&lt;/p&gt;&lt;/blockquote&gt;
+&lt;p&gt;直觉上就是：有一天，爸爸说：“我没有时间一直评估你的学习进度并画新的分数线。为什么不先做五套模拟测试，然后用它们的平均分作为你的预期分数呢？如果你在真正的测试中超过了这个平均分，那就说明你比自己的预期做得更好，所以我就会奖励你。否则，你不会得到太多。”我和哥哥，甚至可能还有更多的同学，都可以依靠各自的一套模拟测试，而不是一个爸爸需要不断调整的“价值函数”。&lt;/p&gt;
+&lt;h4 id="grpo目标"&gt;GRPO目标
+&lt;/h4&gt;&lt;p&gt;与PPO类似，GRPO仍然使用&lt;strong&gt;剪裁替代损失&lt;/strong&gt;以及&lt;strong&gt;KL惩罚&lt;/strong&gt;。这里没有使用熵奖励项，因为基于组的采样已经鼓励了探索。剪裁替代损失与PPO中使用的完全相同，但为了完整性，这里再次给出：&lt;/p&gt;
+$$
+\begin{align*}
+&amp; \mathcal{L}_{\text{clip}}(\theta) = \\
+&amp;\frac{1}{N} \sum_{i=1}^N \left( \min\left( \frac{\pi_\theta(r_i|p)}{\pi_{\theta_{\text{old}}}(r_i|p)} A_i, \ \text{clip}\left( \frac{\pi_\theta(r_i|p)}{\pi_{\theta_{\text{old}}}(r_i|p)}, 1-\epsilon, 1+\epsilon \right) A_i \right) \right),
+\end{align*}
+$$&lt;p&gt;然后，加上KL惩罚项，最终的GRPO目标可以写为：&lt;/p&gt;
+$$
+\mathcal{L}_{\text{GRPO}}(\theta) = \underbrace{\mathcal{L}_{\text{clip}}(\theta)}_{\text{最大化奖励}} - \underbrace{w_1\mathbb{D}_{\text{KL}}(\pi_\theta || \pi_{\text{orig}})}_{\text{惩罚KL散度}}
+$$&lt;h2 id="关于r1的更多思考残酷的简洁"&gt;关于R1的更多思考：残酷的简洁
+&lt;/h2&gt;&lt;p&gt;最后，关于R1再多说几句。&lt;/p&gt;
+&lt;p&gt;无论是否被过度吹捧，从论文中可以明显看出，R1在LLM训练中采用了&lt;strong&gt;剥离一切冗余、直截了当的方法&lt;/strong&gt;，优先考虑残酷的简洁而非复杂性。GRPO只是冰山一角。以下是更多体现其残酷简洁的例子：&lt;/p&gt;
+&lt;h3 id="1-基于规则的确定性奖励"&gt;&lt;strong&gt;1. 基于规则的确定性奖励&lt;/strong&gt;
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;是什么&lt;/strong&gt;：放弃神经过程奖励模型（PRM）或结果奖励模型（ORM）。使用&lt;strong&gt;二元检查&lt;/strong&gt;，包括：
+&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;答案正确性&lt;/strong&gt;：最终答案与标准答案匹配（例如，数学解题、代码编译）。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;格式化&lt;/strong&gt;：强制答案使用&lt;code&gt;&amp;lt;think&amp;gt;...&amp;lt;/think&amp;gt;&amp;lt;answer&amp;gt;...&amp;lt;/answer&amp;gt;&lt;/code&gt;模板。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;语言一致性&lt;/strong&gt;：惩罚混合语言输出（例如，用英语推理回答中文问题）。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;为什么&lt;/strong&gt;：确定性规则避免了&lt;strong&gt;奖励操纵&lt;/strong&gt;（例如，模型通过看似合理但错误的步骤欺骗神经奖励模型），并消除了奖励模型的训练成本。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="2-冷启动数据最少的人工干预"&gt;&lt;strong&gt;2. 冷启动数据：最少的人工干预&lt;/strong&gt;
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;是什么&lt;/strong&gt;：不使用大规模的SFT数据集，而是通过以下方式收集&lt;strong&gt;几千个高质量的CoT示例&lt;/strong&gt;：
+&lt;ul&gt;
+&lt;li&gt;使用少量示例提示基础模型。&lt;/li&gt;
+&lt;li&gt;轻量级的人工后期处理（例如，添加Markdown格式）。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;为什么&lt;/strong&gt;：避免了昂贵的SFT阶段，同时为RL提供了“足够好”的起点。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="3-拒绝采样过滤困难训练更难"&gt;&lt;strong&gt;3. 拒绝采样：过滤困难，训练更难&lt;/strong&gt;
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;是什么&lt;/strong&gt;：在RL训练后，生成&lt;strong&gt;60万个推理轨迹&lt;/strong&gt;，然后&lt;strong&gt;丢弃所有错误响应&lt;/strong&gt;。只保留“胜者”（正确答案）用于监督微调（SFT）。没有复杂的重新排序，没有偏好对。仅仅是适者生存的过滤。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;为什么&lt;/strong&gt;：它有效，为什么不呢！&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h3 id="4-蒸馏复制粘贴推理"&gt;&lt;strong&gt;4. 蒸馏：复制粘贴推理&lt;/strong&gt;
+&lt;/h3&gt;&lt;ul&gt;
+&lt;li&gt;&lt;strong&gt;是什么&lt;/strong&gt;：为了训练较小的模型，直接在DeepSeek-R1生成的&lt;strong&gt;80万个响应&lt;/strong&gt;上进行微调。没有RL，没有迭代对齐——只是模仿。&lt;/li&gt;
+&lt;li&gt;&lt;strong&gt;为什么&lt;/strong&gt;：较小的模型继承了较大模型通过暴力RL发现的推理模式，从而绕过了小型部署中的昂贵RL。&lt;/li&gt;
+&lt;/ul&gt;
+&lt;p&gt;DeepSeek R1的设计反映了人工智能领域的一个更广泛的趋势：&lt;strong&gt;规模和简洁往往胜过聪明的工程&lt;/strong&gt;。通过无情地简化：用规则替换学习组件，利用大规模并行采样，并锚定在预训练的基线上，R1以更少的失败模式实现了SOTA结果。它并不优雅，但它是&lt;em&gt;有效的&lt;/em&gt;。&lt;/p&gt;
+&lt;p&gt;谁会想到激励良好思考的最佳方式是：&lt;strong&gt;停止过度思考&lt;/strong&gt;。&lt;/p&gt;</description></item></channel></rss>
