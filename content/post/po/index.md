@@ -30,8 +30,11 @@ tags:
 一个常见的 KL 正则化 RLHF 目标可以写成：
 
 $$
-\max_\pi \; \mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi(\cdot|x)} \left[ r(x,y) \right]
-- \beta \mathbb{D}_{\text{KL}}\left(\pi(y|x) \| \pi_{\text{ref}}(y|x)\right),
+\max_\pi \; 
+\mathbb{E}_{x \sim \mathcal{D},\, y \sim \pi(\cdot|x)} 
+\left[ r(x,y) \right] 
+- \beta \, 
+\mathbb{D}_{\mathrm{KL}}\left( \pi(y|x) \, \|\, \pi_{\text{ref}}(y|x) \right)
 $$
 
 其中：
@@ -195,13 +198,11 @@ $$
 在 RLHF 中，最终的 PPO 训练目标通常还会加入 KL 惩罚和 value loss：
 
 $$
-\mathcal{L}_{\text{PPO}}
-= \mathcal{L}_{\text{clip}}
-- \beta \mathbb{D}_{\text{KL}}(\pi_\theta \| \pi_{\text{ref}})
-- c_v \mathcal{L}_{\text{value}}
-+ c_e \mathcal{H}(\pi_\theta).
+\mathcal{L}_{\text{PPO}} = \mathcal{L}_{\text{clip}} 
+- \beta \, \mathbb{D}_{\mathrm{KL}}(\pi_\theta \, \| \, \pi_{\text{ref}}) 
+- c_v \mathcal{L}_{\text{value}} 
++ c_e \, \mathcal{H}(\pi_\theta)
 $$
-
 其中 value loss 通常是：
 
 $$
