@@ -320,7 +320,8 @@ $$
 GRPO 仍然沿用了 PPO 的 clipped objective。对于第 $i$ 个回答中的第 $t$ 个 token，定义概率比率：
 
 $$
-\rho_{i,t}(\theta) = \frac{\pi_\theta(y_{i,t}|x,y_{i,<t})}{\pi_{\theta_{\text{old}}}(y_{i,t}|x,y_{i,<t})}.
+\rho_{i,t}(\theta) 
+= \frac{\pi_\theta(y_{i,t} \mid x, y_{i,<t})}{\pi_{\theta_{\text{old}}}(y_{i,t} \mid x, y_{i,<t})}.
 $$
 
 GRPO 的策略目标可以写成：
