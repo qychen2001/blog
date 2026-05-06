@@ -1,7 +1,7 @@
 ---
 title: 'Learn Claude Code'
 description: 'Learn Claude Code 学习笔记'
-date: 2025-04-07 00:00:00+0000
+date: 2026-04-07 00:00:00+0000
 math: true
 categories:
     - '开发'
