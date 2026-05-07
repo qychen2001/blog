@@ -279,6 +279,46 @@ $$
 
 这也是为什么在推理模型训练中，GRPO 重新变得重要。
 
+## SimPO：DPO 的参考模型无关优化
+
+DPO 虽然已将 RLHF 折叠成一个优雅的离线分类损失，但它仍然依赖参考模型 $\pi_{\rm ref}$ 来实现隐式 KL 约束。这带来了两个实际问题：一是训练时需要同时加载策略模型和参考模型，显存与计算开销显著增加；二是 DPO 使用完整序列的 $\log \pi_\theta(y|x)$ 之和作为隐式奖励，由于每个 token 的 $\log p < 0$，更长的回答总 log probability 天然更低，模型容易通过生成冗长回答来“hack”优化目标（长度偏差）。
+
+**SimPO（Simple Preference Optimization，简单偏好优化）** 正是针对这些痛点提出的 DPO 重要改进，由 Princeton NLP 团队在 2024 年提出（NeurIPS 2024）。它在保持 DPO 所有核心优势（无需奖励模型、无需在线采样、无需价值模型）的同时，进一步简化实现并显著提升性能。
+
+### SimPO 的核心设计
+
+1. 完全移除参考模型：不再需要 $\pi_{\rm ref}$，直接把当前策略模型 $\pi_\theta$ 的平均对数概率作为隐式奖励：
+   $$
+   r(y) = \frac{1}{|y|} \log \pi_\theta(y \mid x)
+   $$
+   其中 $|y|$ 是回答的 token 数量。这种长度归一化设计让奖励更贴合生成过程的 per-token 平均似然，从根本上缓解了长度偏差。
+
+2. 引入目标奖励 margin：为了确保 chosen response 的奖励明显高于 rejected response，SimPO 在 sigmoid 内部加入一个可调的 margin 参数 $\gamma$：
+   $$
+   \mathcal{L}_{\rm SimPO}(\theta) 
+   = -\mathbb{E}_{(x,y_w,y_l)\sim \mathcal{D}} 
+   \left[ 
+     \log \sigma \Bigl( 
+       \beta \Bigl( 
+         \frac{1}{|y_w|} \log \pi_\theta(y_w|x) 
+         - 
+         \frac{1}{|y_l|} \log \pi_\theta(y_l|x) 
+       \Bigr) 
+       - \gamma 
+     \Bigr) 
+   \right].
+   $$
+   典型超参数范围：$\beta \in [2.0, 2.5]$（远大于 DPO 的 0.01–0.1），$\gamma \in [0.3, 1.6]$。
+
+### SimPO 的工程与性能优势
+
+- 更轻量：无需参考模型，训练时间和 GPU 显存分别降低约 20% 和 10%，实现复杂度也大幅下降。
+- 性能更强：在 AlpacaEval 2 上比 DPO 最高提升 6.4 分，在 Arena-Hard 上最高提升 7.5 分，在 Llama-3、Mistral、Gemma-2 等多种基座上均有稳定领先。
+- 更少长度利用：生成回答长度与 SFT/DPO 模型接近，几乎不出现过度拉长现象。
+- 训练更稳定：长度归一化 + 显式 margin 让梯度信号更鲁棒，对偏好数据中的噪声有一定容忍度。
+
+SimPO 仍然是离线方法，完美继承 DPO 的所有工程便利性，但通过更精巧的隐式奖励设计（平均 log probability + margin），在去掉参考模型后反而获得了更好的对齐效果。这证明了：KL 正则化 RLHF 目标的解析形式还有进一步优化的空间。
+
 ## GRPO：保留在线 RL，去掉价值模型
 
 GRPO（Group Relative Policy Optimization）可以看作是 PPO 的另一种简化方向。它没有像 DPO 那样完全放弃在线 RL，而是保留了“采样—打分—更新”的过程；但它去掉了 PPO 中最重的 critic / value model。
