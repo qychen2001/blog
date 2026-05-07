@@ -137,3 +137,58 @@ $$
 $$
 
 一句话总结：**DPO 直接让策略提高 chosen 相对 reference 的概率，同时压低 rejected 相对 reference 的概率**，整个过程只用一个模型、一次 offline 训练，干净、稳定、高效。
+
+## 附录：变分导数这一步的详细推导
+
+### 背景知识
+- 我们优化的对象不是模型参数 $\theta$，而是**整个概率分布函数** $\pi(\cdot|x)$，这属于**变分学**（calculus of variations）。
+- 语言模型是离散的，但 RL 文献常用泛函导数记号，因为它对连续动作空间也成立，且更简洁。
+
+### 离散情况（最推荐的直观方式）
+固定 $x$，令 $p_y = \pi(y|x)$，$q_y = \pi_{\rm ref}(y|x)$，$r_y = r(x,y)$。目标：
+
+$$
+J(p) = \sum_y p_y r_y - \beta \sum_y p_y \log \frac{p_y}{q_y}, \quad \sum_y p_y = 1
+$$
+
+Lagrangian：
+
+$$
+L = \sum_y p_y r_y - \beta \sum_y p_y (\log p_y - \log q_y) + \lambda (1 - \sum_y p_y)
+$$
+
+对**某个具体** $p_k$ 求偏导 $\frac{\partial L}{\partial p_k}$：
+
+- $p_k r_k$ → 贡献 $r_k$
+- $-\beta p_k \log p_k$ → 贡献 $-\beta (\log p_k + 1)$ （关键！因为 $\frac{d}{dp}(p \log p) = \log p + 1$）
+- $+\beta p_k \log q_k$ → 贡献 $+\beta \log q_k$
+- 约束 → 贡献 $-\lambda$
+
+合起来：
+
+$$
+r_k - \beta \log \frac{p_k}{q_k} - \beta - \lambda = 0
+$$
+
+这个“-$\beta$”正是来自负熵项 $p \log p$ 的导数特性。解出 $p_k \propto q_k \exp(r_k / \beta)$，归一化即得闭式解。
+
+### 连续情况（泛函导数）
+目标写成积分形式。给 $\pi$ 一个微小扰动 $\pi_\epsilon = \pi + \epsilon \eta$（$\int \eta = 0$），要求变分为零：
+
+计算后同样得到：
+
+$$
+r(y) - \beta \log \frac{\pi(y)}{q(y)} - \beta - \lambda = 0
+$$
+
+**离散和连续结果完全一致**。那个“-$\beta$”项在两种情况下都必然出现。
+
+### 小扰动直观法（无需记住公式）
+在某个 $y$ 上多给一点概率 $\delta p$（同时在别处减掉保持归一化），目标变化必须为零：
+
+- 奖励：$+\delta p \cdot r(y)$
+- KL 变化：$\delta p \cdot (-\beta \log \frac{\pi}{q}) - \beta \delta p$
+
+平衡后得到完全相同的条件。
+
+这个技巧来自**最大熵强化学习**（MaxEnt RL）和 TRPO/PPO 的理论基础，是现代对齐方法的共同基石。
