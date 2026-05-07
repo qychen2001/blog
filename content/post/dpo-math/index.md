@@ -1,5 +1,5 @@
 ---
-title: 'DPO 的核心秘密：从 RLHF 目标直接推导出“闭式最优解”'
+title: 'DPO 的闭式最优解推导'
 description: 'DPO 里最优雅、最重要的一个数学洞见：KL 正则化 RLHF 目标的闭式关系。这个推导正是 DPO 能“跳过 Reward Model + PPO”两步，直接用人类偏好数据端到端训练策略模型的根本原因。'
 date: 2025-06-18 00:00:00+0000
 math: true
