@@ -251,3 +251,109 @@ for block in response.content:
 2. 在 `TOOL_HANDLERS` 里注册一行
 
 主循环完全不用改。
+
+## 会话里的计划
+
+**计划不是替模型思考，而是把“正在做什么”明确写出来。**
+
+这一章我们给大脑加一个**当前工作面板**，让它在大任务中不容易忘事或跑偏。
+
+### 为什么需要这一步？
+
+在上一节中 Agent 已经能读文件、写文件、跑命令了。
+
+但当任务变成多步的时候，很快就会出现问题：
+
+- 做着做着就忘了最初的目标
+- 已经检查过的东西又重复做一遍
+- 一开始列了很多步骤，后面又开始即兴发挥
+
+**原因很简单**：模型虽然很聪明，但它的注意力很容易受当前上下文影响。
+
+我们需要把**当前计划**从模型的脑子里“拿出来”，变成系统里一块看得见、能持续更新的面板。
+
+
+### 最简单的心智模型
+
+```mermaid
+flowchart TD
+    A[用户提出大任务] --> B[模型先写一份计划]
+    B --> C[当前计划面板]
+    C --> D[模型专注当前一步]
+    D --> E[做完一步]
+    E --> F[更新计划面板]
+    F --> C
+    C -.->|连续几轮没更新| G[系统轻轻提醒]
+```
+
+计划不是一次性写完就扔掉，而是**边做边更新**的活面板。
+
+### 怎么实现？
+
+#### 准备一个计划管理器（TodoManager）
+
+```python
+class TodoManager:
+    def __init__(self):
+        self.items = []          # 当前计划列表
+        self.rounds_since_update = 0   # 多少轮没更新计划了
+```
+
+#### 让模型可以整份更新计划
+
+```python
+def update(self, items: list) -> str:
+    # 验证并保存新计划
+    # 同一时间只允许一个步骤是 "正在做"
+    self.items = normalized_items
+    self.rounds_since_update = 0
+    return self.render()   # 返回可读的计划文本
+```
+
+#### 把计划渲染成清晰的文本
+
+```python
+def render(self) -> str:
+    lines = []
+    for item in self.items:
+        if item.status == "pending":
+            marker = "[ ]"
+        elif item.status == "in_progress":
+            marker = "[>]"
+        else:
+            marker = "[x]"
+        lines.append(f"{marker} {item.content}")
+    return "\n".join(lines)
+```
+
+#### 把 todo 注册成一个普通工具
+
+```python
+TOOL_HANDLERS = {
+    "bash":       ...,
+    "read_file":  ...,
+    "write_file": ...,
+    "edit_file":  ...,
+    "todo":       lambda **kw: TODO.update(kw["items"]),   # 新增
+}
+```
+
+**注意**：循环本身完全不需要改，和 s02 一样。
+
+### 加上温和的提醒机制
+
+```python
+if not used_todo:   # 这轮没更新计划
+    TODO.rounds_since_update += 1
+    if TODO.rounds_since_update >= 3:
+        results.insert(0, {"type": "text", "text": "<reminder>请刷新一下当前计划</reminder>"})
+```
+
+### 它如何接进主循环？
+
+从这一章开始，主循环除了维护 `messages`，还多维护了一份**会话计划状态**：
+
+- `messages` ：模型看到的历史对话
+- `planning state` ：当前正在做的计划面板（外显、可更新）
+
+这样，模型不再只靠脑子记计划，而是有一个外部的“白板”可以反复查看和修改。
