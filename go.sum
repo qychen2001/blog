@@ -1,2 +1,4 @@
-github.com/CaiJimmy/hugo-theme-stack/v3 v3.30.0 h1:uITC7EKGyfPjyi3C5At++E0Uu1qQXtqiwMV4pd7LkLs=
-github.com/CaiJimmy/hugo-theme-stack/v3 v3.30.0/go.mod h1:IPmCXiIxlFSLFYS0tOmYP6ySLviyeNVSabyvSuaxD+I=
+github.com/CaiJimmy/hugo-theme-stack/v4 v4.0.2 h1:q9cWu6ZS4wSesFjIjpIPueKaRmD7IoRFMGzvwZSqaBA=
+github.com/CaiJimmy/hugo-theme-stack/v4 v4.0.2/go.mod h1:6SWZIQIut6uVjxhLraexYzgtdNDrod0xnfM/to6D/1I=
+github.com/hugomods/icons/vendors/font-awesome v0.6.12 h1:I8ckJFuxr8mD8bJ4NX9NrmnHd3f6XvITuD2ME8a9wXc=
+github.com/hugomods/icons/vendors/font-awesome v0.6.12/go.mod h1:6YBo/5GaNpAocKwnKNWcd9xkliiRJXmwz2mstY5lr9I=
