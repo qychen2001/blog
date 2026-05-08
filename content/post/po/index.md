@@ -396,54 +396,109 @@ GRPO 最大的变化是去掉了 value model。
 
 当然，GRPO 也不是没有代价。它需要对每个 prompt 采样多个回答，因此 rollout 成本会增加；如果组大小太小，组内 baseline 的估计会不稳定；如果 reward 过于稀疏，比如一组回答全错或全对，advantage 信号也会变弱。
 
-## PPO、DPO、GRPO 的关系
+## DAPO：GRPO 的工程精细化
 
-现在可以把三者放在同一条线索上重新看。
+DAPO 保留了 GRPO 的整体框架（组采样 + 组内归一化优势 + clipped surrogate），但在四个关键环节做了针对性调整，使训练信号更有效、探索更充分、长序列处理更合理。
 
-### PPO：最完整，但最重
+### Clip-Higher：非对称裁剪
 
-PPO 是最接近经典 RLHF 目标的实现方式：先训练奖励模型，再通过在线 RL 最大化奖励，同时用 KL 约束防止策略偏离参考模型。它的优势是通用、直接、可以在线探索；缺点是系统复杂，需要 reward model、reference model、value model 和稳定的 RL 训练管线。
+GRPO 使用对称裁剪区间 $[1-\varepsilon, 1+\varepsilon]$。当优势 $A_i > 0$ 时，概率比率 $\rho_{i,t}(\theta)$ 一旦超过 $1+\varepsilon$ 即被裁剪。这对旧策略下概率较低的 token 尤其不利：即使新策略大幅提升了该 token 的概率，也会被硬性截断，导致有用探索信号丢失。
 
-### DPO：最简洁，但更依赖离线偏好数据
+DAPO 将裁剪解耦为非对称形式：
 
-DPO 直接把 KL 正则化 RLHF 目标改写成偏好对上的分类损失。它不需要 reward model，也不需要 PPO rollout，因此实现简单、训练稳定，非常适合已有高质量偏好数据的对齐场景。
+$$
+\text{clip}\bigl(\rho_{i,t}(\theta), 1-\varepsilon_{\rm low}, 1+\varepsilon_{\rm high}\bigr)
+$$
 
-但 DPO 不主动探索。它主要学习数据集中已经体现出来的偏好关系。因此，对于需要大量试错、采样和可验证反馈的复杂推理任务，DPO 往往不是最终答案，而更像是一个高效的偏好微调工具。
+其中 $\varepsilon_{\rm high} > \varepsilon_{\rm low}$。**仅放宽正方向的上界**，允许低概率 token 有更大提升空间，同时对负方向仍保持严格约束。这既保留了 PPO/GRPO 的稳定性，又显著增强了探索能力，避免策略过早退化为确定性输出。
 
-### GRPO：面向推理训练的轻量在线 RL
+### 动态采样：保证有效优势信号
 
-GRPO 保留了 PPO 的在线 RL 框架，但用组内相对奖励替代 critic。它尤其适合 reward 可自动验证的任务，例如数学、代码和结构化推理。相比 PPO，它更轻量；相比 DPO，它保留了在线采样和探索能力。
+GRPO 在某些 prompt 下很容易采出全对或全错的一组回答，此时组内均值与标准差相等，$A_i = 0$，整组梯度为零，采样算力被白白浪费。
 
-可以用一句话概括：
+DAPO 增加了一个采样约束：**必须保证组内存在至少一个正确和一个错误的回答**（即 advantage 不全为零）。若当前采样不满足条件，则重新对该 prompt 进行 rollout，直到满足为止。这种“动态重采样”确保每一批数据都能产生有意义的梯度信号，从根本上提高了采样效率。
 
-> PPO 是“显式奖励模型 + critic + 在线 RL”；DPO 是“无显式奖励模型的离线偏好优化”；GRPO 是“无 critic 的在线相对奖励优化”。
+### Token-level 梯度聚合
 
-## 为什么推理模型更偏向 GRPO？
+GRPO 的目标函数对每条回答先做 token 平均，再跨回答平均：
 
-如果目标是一般偏好对齐，例如让回答更有帮助、更安全、更符合人类口味，那么 DPO 是一个非常自然的选择，因为这类偏好往往可以通过 chosen/rejected 数据表达。
+$$
+\frac{1}{G}\sum_{i=1}^G\frac{1}{|y_i|}\sum_{t=1}^{|y_i|}\cdots
+$$
 
-但推理任务有一个不同点：它们经常存在可验证答案。
+这导致长回答对整体 loss 的贡献被严重低估：200 token 的回答权重只有 10 token 回答的 1/20。即使长回答中包含关键推理步骤，其梯度也会被稀释。
 
-数学题可以检查最终答案；代码题可以跑测试；某些工具调用任务可以检查执行结果。这类任务不一定需要人类主观偏好，而更需要模型在大规模采样中发现“哪些解法真的能通向正确答案”。
+DAPO 改为**全局 token 级聚合**：
 
-在这种场景下，在线 RL 的价值会重新凸显。模型可以对同一道题生成多个候选推理轨迹，奖励函数只需要判断最终结果或格式是否正确。GRPO 通过组内比较，把这些候选轨迹转化成相对优势信号，进而强化高 reward 的生成模式。
+$$
+\frac{1}{\sum_{i=1}^G |y_i|}\sum_{i=1}^G\sum_{t=1}^{|y_i|}\min\bigl(\rho_{i,t}(\theta)A_i,\ \text{clip}(\cdots)A_i\bigr)
+$$
 
-这也是为什么 GRPO 在推理模型训练中很有吸引力：它没有 PPO 那么重，又比 DPO 更适合在线探索。
+每条 token 对梯度的贡献完全平等，与回答长度无关。这让长 CoT 中真正重要的 token 获得应有权重，同时有效抑制冗长废话的负面影响。
 
-## 小结
+### 超长回答奖励塑形
 
-PPO、DPO 和 GRPO 并不是三种彼此割裂的方法，而是围绕同一个偏好优化目标形成的三种工程路径。
+长回答容易“hack”奖励：正确但啰嗦的回答拿高分，错误但重复的回答也可能因为长度而被误判。DAPO 引入软惩罚机制：当回答长度超过第一阈值后，奖励线性衰减；超过第二阈值后直接视为无效。这让奖励信号更干净，引导模型学会“简洁且正确”。
 
-PPO 的思路最传统：显式训练奖励模型，再用 actor-critic 做在线策略优化。它的表达能力强，但系统复杂。
+综合以上四点，DAPO 的完整目标可写为：
 
-DPO 的思路最优雅：利用 KL 正则化 RLHF 目标的解析形式，把奖励建模和 RL 优化折叠成一个偏好分类损失。它简单稳定，但依赖离线偏好数据，缺少在线探索。
+$$
+\begin{aligned}
+\mathcal{L}_{\rm DAPO}(\theta) 
+&= \mathbb{E}_{x\sim\mathcal{D},\ \{y_i\}\sim\pi_{\theta_{\rm old}}}\Bigg[
+\frac{1}{\sum_i |y_i|}\sum_i\sum_t 
+\min\Bigl(
+\rho_{i,t}(\theta)A_i,\ 
+\text{clip}\bigl(\rho_{i,t}(\theta),1-\varepsilon_{\rm low},1+\varepsilon_{\rm high}\bigr)A_i
+\Bigr)
+\Bigg] \\
+&\quad - \beta\,\mathbb{D}_{\rm KL}(\pi_\theta\|\pi_{\rm ref})
+\end{aligned}
+$$
 
-GRPO 的思路最实用：保留在线采样和奖励优化，但去掉 PPO 中昂贵的价值模型，用同一 prompt 下多个回答的组内相对表现来估计优势。它尤其适合数学、代码等可验证推理任务。
+（其中动态采样约束隐含在期望的采样过程中）
 
-因此，如果我们从后训练方法的演化角度看，这条线索并不是简单的“PPO 被 DPO 替代，DPO 又被 GRPO 替代”。更准确地说，它们分别服务于不同约束下的偏好优化：
+DAPO 的本质是**在不改变 GRPO 核心思想的前提下，通过更精细的信号传递和约束，让在线 RL 在长序列场景下真正稳定可用**。
 
-- 当我们需要通用的在线奖励优化时，PPO 仍然是基础方案；
-- 当我们有高质量偏好对并希望简单稳定训练时，DPO 很合适；
-- 当任务可验证、需要大量在线采样提升推理能力时，GRPO 更有优势。
+## GSPO：从 token 级到 sequence 级的优化粒度转变
 
-这也是 LLM 后训练方法演化中最值得注意的一点：算法并不是越复杂越好，而是要和奖励来源、数据形态、任务类型以及工程成本匹配。
+GSPO 进行了一次更本质的调整：把 importance sampling 从 token 级提升到 sequence 级。
+
+### 为什么 token 级在某些架构下存在问题？
+
+在 MoE 模型中，每个 token 的专家激活是动态的。旧策略和新策略在生成同一回答时，不同 token 可能激活完全不同的专家子网络，导致 token 级的比率 $\rho_{i,t}(\theta)$ 波动极大：有的 token ratio 飙升数百倍，有的接近零。这不仅使 clipping 产生大量无效梯度，还引入了与奖励（sequence-level）不匹配的结构性噪声，训练极不稳定。
+
+### GSPO 的核心改动
+
+GSPO 用整条回答的 sequence-level 概率比替代 token-level 比率：
+
+$$
+s_i(\theta) = \left( \frac{\pi_\theta(y_i|x)}{\pi_{\theta_{\rm old}}(y_i|x)} \right)^{1/|y_i|}
+= \exp\left( \frac{1}{|y_i|}\sum_{t=1}^{|y_i|}\log\rho_{i,t}(\theta) \right)
+$$
+
+即整条回答概率比的长度归一化几何平均。然后在 clipped objective 中，同一回答的所有 token 都使用同一个 $s_i(\theta)$：
+
+$$
+\begin{aligned}
+\mathcal{L}_{\rm GSPO}(\theta) 
+&= \mathbb{E}_{x\sim\mathcal{D},\ \{y_i\}\sim\pi_{\theta_{\rm old}}}\Bigg[
+\frac{1}{G}\sum_i\frac{1}{|y_i|}\sum_t 
+\min\Bigl(
+s_i(\theta)A_i,\ 
+\text{clip}\bigl(s_i(\theta),1-\varepsilon,1+\varepsilon\bigr)A_i
+\Bigr)
+\Bigg] \\
+&\quad - \beta\,\mathbb{D}_{\rm KL}(\pi_\theta\|\pi_{\rm ref})
+\end{aligned}
+$$
+
+### 优势
+
+- 同一回答内所有 token 受到完全一致的更新强度，消除了 token 间剧烈波动带来的高方差；
+- 与 sequence-level 奖励天然对齐，credit assignment 更干净；
+- 特别适合 MoE 架构，因为不再依赖每个 token 的专家激活路径，训练稳定性显著提升。
+
+GSPO 的代价是牺牲了一部分 token 级的精细控制，但对最终奖励只依赖完整回答正确性的任务来说，这种 sequence-level 视角反而更合理。
+
+DAPO 和 GSPO 可以正交组合使用：DAPO 负责解决采样效率、梯度稀释和探索问题，GSPO 负责解决架构带来的方差问题。两者都保留了 GRPO “去掉价值模型 + 组内相对优势 + 在线采样” 的核心优势，只是把信号传递和优化粒度做得更贴合实际训练场景。
