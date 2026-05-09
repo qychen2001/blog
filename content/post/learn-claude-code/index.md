@@ -1461,3 +1461,359 @@ for note in notifications:
 ```
 
 这样定时任务最终还是通过普通 user message 的形式回到模型手里。
+
+# Agent 团队
+
+**子 Agent 适合一次性委派，团队系统解决的是“有人长期在线、能继续接活、能互相协作”。**
+
+这一章我们把**一次性子任务**升级成**长期存在的专职队友**，让系统真正拥有可持续协作的团队。
+
+### 为什么需要这一步？
+
+subagent 已经能很好地处理一次性小任务：
+
+> “帮我查一下这个，再回来汇报”
+
+但 subagent 执行完就消失了。它不适合下面这些场景：
+
+- 让一个测试专员长期待命
+- 让代码审查员和实现者长期分工
+- 某个队友未来收到新任务后能继续接手
+
+**这一节的核心升级是**：引入有名字、有身份、有独立生命周期的**长期队友**，让他们能反复接收任务、互相协作。
+
+### 最简单的心智模型
+
+```mermaid
+flowchart TD
+    A[Lead 主 Agent] --> B[spawn alice coder]
+    A --> C[spawn bob tester]
+    
+    subgraph 队友 alice
+    D[自己的 messages] 
+    E[自己的 inbox]
+    end
+    
+    subgraph 队友 bob
+    F[自己的 messages]
+    G[自己的 inbox]
+    end
+    
+    A -->|发消息| E
+    A -->|发消息| G
+    E -->|处理后回复| A
+```
+
+**关键区别**：  
+subagent 是一次性执行单元，teammate 是有持久身份的长期协作成员。
+
+---
+
+### 怎么实现？
+
+#### 团队名册（Team Roster）
+
+```python
+member = {
+    "name": "alice",
+    "role": "coder",
+    "status": "idle" | "working" | "offline"
+}
+```
+
+名册通常保存在 `.team/config.json`，记录当前团队里有哪些人、各自负责什么。
+
+#### 每个队友都有自己的邮箱（Inbox）
+
+```python
+.team/inbox/alice.jsonl
+.team/inbox/bob.jsonl
+```
+
+发消息时追加一条记录：
+
+```python
+{
+    "type": "message",
+    "from": "lead",
+    "content": "请审查 auth 模块",
+    "timestamp": 1710000000.0
+}
+```
+
+队友在自己下一轮工作前，先去收件箱取信。
+
+#### 每个队友都有自己的独立循环
+
+```python
+def teammate_loop(name: str, role: str, initial_prompt: str):
+    messages = [{"role": "user", "content": initial_prompt}]
+    
+    while True:
+        # 先收邮件
+        inbox = read_inbox(name)
+        for msg in inbox:
+            messages.append({"role": "user", "content": msg})
+        
+        # 正常 agent loop
+        response = client.messages.create(...)
+        ...
+```
+
+## 团队协议
+
+**有了邮箱以后，团队已经能说话；有了协议以后，团队才开始会“按规矩协作”。**
+
+这一章我们给团队增加**结构化协作规则**：让队友之间的沟通不再只是自由聊天，而是能被准确追踪、批准和响应的请求-响应模式。
+
+### 为什么需要这一步？
+
+上一节已经让队友之间可以互相发消息，但如果全靠自然语言，会出现两个大问题：
+
+- 重要动作（比如关机、高风险计划）无法明确批准或拒绝
+- 多个请求同时存在时，很难知道“这条回复对应哪一个请求”
+
+**这一章的核心升级是**：引入统一的**请求-响应协议**，让协作变得可理解、可调试、可扩展。
+
+### 最简单的心智模型
+
+```mermaid
+flowchart TD
+    A[发起方] -->|发送带 request_id 的协议请求| B[接收方 inbox]
+    B --> C[接收方处理]
+    C -->|明确回复 approve/reject| D[更新请求状态]
+    D --> E[双方都能通过 request_id 对上号]
+```
+
+**关键思想**：协议消息不是普通聊天，它带有编号和状态，能被系统稳定追踪。
+
+---
+
+### 怎么实现？（核心概念）
+
+#### 协议消息结构（ProtocolEnvelope）
+
+```python
+{
+    "type": "shutdown_request",      # 请求类型
+    "from": "lead",
+    "to": "alice",
+    "request_id": "req_001",         # 唯一编号
+    "payload": {},
+    "timestamp": 1710000000.0
+}
+```
+
+#### 请求状态追踪表（RequestRecord）
+
+```python
+{
+    "request_id": "req_001",
+    "kind": "shutdown",
+    "from": "lead",
+    "to": "alice",
+    "status": "pending" | "approved" | "rejected" | "expired"
+}
+```
+
+#### 最小协议示例
+
+**协议 1：优雅关机**
+
+```python
+# 发起方
+def request_shutdown(target: str):
+    request_id = new_id()
+    requests[request_id] = {"kind": "shutdown", "status": "pending"}
+    bus.send(target, type="shutdown_request", request_id=request_id)
+```
+
+**协议 2：计划审批**
+
+```python
+# 审批方回复
+def review_plan(request_id: str, approve: bool, feedback: str):
+    record = requests[request_id]
+    record["status"] = "approved" if approve else "rejected"
+    bus.send(record["from"], type="plan_approval_response", 
+             request_id=request_id, approve=approve, feedback=feedback)
+```
+
+## 自主代理
+
+**自主性开始于：队友能安全找到可做的事、认领它，并带着正确身份继续执行。**
+
+这一章我们让团队从“被动等待分配”升级到**主动认领**：空闲的队友会自己扫描任务板，找到适合自己的工作并主动接手。
+
+
+### 为什么需要这一步？
+
+建立了长期队友和协作协议，但目前大部分工作仍然要靠 Lead（主 Agent）手动分配。
+
+当任务越来越多时，Lead 会变成瓶颈：
+
+- “Alice 去做任务 3”
+- “Bob 去做任务 7”
+- “Charlie 检查任务 12”
+
+**这一章的核心升级是**：让空闲队友**自主扫描任务板**，按照角色和规则安全认领可做的工作，从而实现真正的团队自治。
+
+### 最简单的心智模型
+
+```mermaid
+flowchart TD
+    A[队友完成当前工作] --> B[进入 IDLE 阶段]
+    B --> C{检查两件事?}
+    C -->|邮箱有新消息| D[优先处理消息]
+    C -->|任务板有 ready 任务| E[按角色过滤可认领任务]
+    E --> F[原子认领<br/>更新 owner + status]
+    F --> G[补身份上下文]
+    G --> H[带着新任务继续 WORK 阶段]
+    D --> H
+```
+
+**关键点**：自治不是“乱抢任务”，而是**按规则、安全、可追踪**地主动认领。
+
+### 怎么实现？（结合代码讲解）
+
+#### 认领条件判断（Claimable Predicate）
+
+```python
+def is_claimable_task(task: dict, role: str) -> bool:
+    return (
+        task.get("status") == "pending" and
+        not task.get("owner") and
+        not task.get("blockedBy") and
+        _role_matches(task.get("claim_role"), role)
+    )
+```
+
+#### 空闲阶段（IDLE Phase）
+
+```python
+def idle_phase(name: str, role: str, messages: list) -> bool:
+    # 1. 先检查邮箱（优先级最高）
+    inbox = bus.read_inbox(name)
+    if inbox:
+        messages.extend(inbox)
+        return True
+    
+    # 2. 再扫描可认领任务
+    unclaimed = task_manager.scan_claimable(role)
+    if unclaimed:
+        task = unclaimed[0]
+        claim_result = task_manager.claim(task["id"], name, role, source="auto")
+        
+        # 补身份 + 新任务提示
+        ensure_identity(messages, name, role)
+        messages.append({"role": "user", "content": f"<auto-claimed>Task #{task['id']}: {task['subject']}</auto-claimed>"})
+        return True
+    
+    # 长时间没事 → 退出
+    return False
+```
+
+#### 原子认领（防止抢夺）
+
+```python
+def claim(self, task_id: int, owner: str, role: str, source: str = "auto"):
+    with claim_lock:                     # 关键：加锁
+        task = self.load(task_id)
+        if task["owner"] or task["status"] != "pending":
+            return "already claimed"
+        
+        task["owner"] = owner
+        task["status"] = "in_progress"
+        task["claimed_at"] = time.time()
+        task["claim_source"] = source
+        self.save(task)
+        
+        # 记录认领事件
+        log_claim_event(task_id, owner, role, source)
+        return f"Successfully claimed task {task_id}"
+```
+
+#### 身份重注入（防止压缩后失忆）
+
+```python
+def ensure_identity(messages: list, name: str, role: str):
+    if not has_identity_context(messages):
+        messages.insert(0, {
+            "role": "user",
+            "content": f"<identity>You are {name}, role: {role}. Continue your assigned work.</identity>"
+        })
+```
+
+## Worktree 隔离
+
+**Task 管目标，Worktree 管隔离执行车道和收尾状态；两者不能混成一个概念。**
+
+这一章我们给多 Agent 系统增加**执行隔离**能力：让不同任务在各自独立的工作目录（worktree）中运行，互不干扰。
+
+### 为什么需要这一步？
+
+到上一节，系统已经能让多个队友自主认领任务并行工作。
+
+但如果所有人都在同一个工作目录里改文件，很快就会出现严重冲突：
+
+- 两个任务同时修改同一个文件
+- 一个任务的中间改动污染了另一个任务的环境
+- 想单独查看某个任务的改动范围时，无法区分
+
+**这一章的核心升级是**：把“做什么”（任务）和“在哪做”（执行车道）彻底分开，为每个任务分配一条独立的执行车道。
+
+### 最简单的心智模型
+
+```mermaid
+flowchart TD
+    A[任务板] --> B[任务 #12: Refactor auth]
+    B --> C[分配 worktree: auth-refactor]
+    C --> D[.worktrees/auth-refactor 独立目录]
+    D --> E[alice 在此目录执行命令]
+    F[任务 #15: Fix payment] --> G[分配 worktree: payment-fix]
+    G --> H[.worktrees/payment-fix 独立目录]
+    H --> I[bob 在此目录执行命令]
+```
+
+**关键思想**：任务记录工作目标，worktree 记录执行车道。两者通过 task_id 绑定，但目录完全隔离。
+
+### 怎么实现？（核心概念）
+
+### WorktreeRecord（执行车道记录）
+
+```python
+worktree = {
+    "name": "auth-refactor",
+    "path": ".worktrees/auth-refactor",
+    "branch": "wt/auth-refactor",
+    "task_id": 12,
+    "status": "active",
+    "last_entered_at": 1710000000.0,
+    "last_command_preview": "pytest tests/auth -q"
+}
+```
+
+#### 任务记录与 worktree 绑定
+
+```python
+task = {
+    "id": 12,
+    "subject": "Refactor auth flow",
+    "status": "in_progress",
+    "owner": "alice",
+    "worktree": "auth-refactor",      # 当前绑定车道
+    "worktree_state": "active",       # 车道状态
+    "last_worktree": "auth-refactor"
+}
+```
+
+#### 关键操作
+
+- **创建 worktree**：为任务分配独立目录和分支
+- **进入车道**：切换到对应目录执行命令
+- **收尾（Closeout）**：任务结束时决定 `keep`（保留）还是 `remove`（清理）
+
+```python
+def closeout(name: str, action: str = "keep", reason: str = ""):
+    # 更新 worktree 状态 + 任务状态 + 记录事件日志
+```
