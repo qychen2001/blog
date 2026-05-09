@@ -1462,7 +1462,7 @@ for note in notifications:
 
 这样定时任务最终还是通过普通 user message 的形式回到模型手里。
 
-# Agent 团队
+## Agent 团队
 
 **子 Agent 适合一次性委派，团队系统解决的是“有人长期在线、能继续接活、能互相协作”。**
 
