@@ -454,7 +454,7 @@ def run_subagent(prompt: str) -> str:
 - 子智能体**工具更少**（`CHILD_TOOLS`），没有 `task` 工具，防止无限递归
 - 最后只返回总结，不把整个过程塞回父上下文
 
-### 3. 在主循环中处理 `task` 工具
+### 在主循环中处理 `task` 工具
 
 ```python
 if block.name == "task":
@@ -849,7 +849,7 @@ flowchart TD
 
 ### 怎么实现？
 
-#### 1. 定义 Hook 事件
+#### 定义 Hook 事件
 
 ```python
 HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse")
@@ -911,3 +911,553 @@ post = hooks.run_hooks("PostToolUse", {
 ```
 
 **最核心的思想**：主循环只在固定位置调用 `run_hooks`，具体行为由外部 Hook 配置决定。
+
+## 记忆系统（Memory）
+
+**只保存跨会话还成立的东西。**
+
+这一章我们给大脑增加**长期记忆**的能力：让那些跨会话仍然有价值的信息，在下次新会话开始时还能被记住。
+
+### 为什么需要记忆系统？
+
+如果 Agent 每次新会话都从零开始，它就会反复忘记：
+
+- 用户长期的偏好（喜欢 tabs 还是 spaces）
+- 用户多次纠正过的错误
+- 项目中某些不容易从代码直接看出来的背景或约定
+- 外部重要资源的指针
+
+**Memory 的核心作用**是：让 Agent 在不同会话之间保持一定的连续性，显得“越来越懂你和这个项目”。
+
+但先要立一个重要边界：**Memory 不是什么都存**。
+
+### 最简单的心智模型
+
+```mermaid
+flowchart TD
+    A[对话中出现重要信息] --> B[判断是否值得跨会话保存]
+    B -->|值得| C[调用 save_memory 工具]
+    C --> D[.memory/ 目录]
+    D --> E[每个记忆一个 .md 文件]
+    E --> F[MEMORY.md 索引]
+    F --> G[下次新会话开始时]
+    G --> H[加载进 system prompt]
+    H --> I[模型带着记忆继续工作]
+```
+
+**关键原则**：只有跨会话仍有价值、且无法轻易从当前代码重新推导出来的信息，才存进 Memory。
+
+### 怎么实现？（结合代码讲解）
+
+#### Memory 的四种类型
+
+```python
+MEMORY_TYPES = ("user", "feedback", "project", "reference")
+```
+
+- **user**：用户偏好（代码风格、回答长度等）
+- **feedback**：用户明确纠正过的地方
+- **project**：项目中非显而易见的背景或约定
+- **reference**：外部资源指针（看板、文档、监控地址等）
+
+#### MemoryManager（核心管理器）
+
+```python
+class MemoryManager:
+    def load_all(self):
+        # 加载所有 .memory/*.md 文件
+    
+    def load_memory_prompt(self) -> str:
+        # 把记忆拼成一段可读文本，供 system prompt 使用
+        ...
+    
+    def save_memory(self, name, description, mem_type, content):
+        # 保存为单独的 .md 文件（带 frontmatter）
+        # 同时更新 MEMORY.md 索引
+        ...
+```
+
+每个记忆都是一个独立 Markdown 文件，例如：
+
+```markdown
+---
+name: prefer_tabs
+description: User prefers tabs for indentation
+type: user
+---
+The user explicitly prefers tabs over spaces when editing source files.
+```
+
+#### save_memory 工具
+
+```python
+TOOL_HANDLERS = {
+    ...
+    "save_memory": lambda **kw: memory_mgr.save_memory(
+        kw["name"], kw["description"], kw["type"], kw["content"]
+    )
+}
+```
+
+模型可以在任何时候调用这个工具，把值得记住的信息存下来。
+
+#### 会话开始时加载记忆
+
+```python
+def build_system_prompt():
+    memory_section = memory_mgr.load_memory_prompt()
+    return f"""You are a coding agent at {WORKDIR}.
+{memory_section}
+
+{MEMORY_GUIDANCE}"""
+```
+
+这样每次新会话，记忆都会自然地出现在模型的 system prompt 中。
+
+## 系统提示词
+
+**系统提示词不是一整块固定文本，而是一条可维护的组装流水线。**
+
+这一章我们把模型的“输入大脑”从一大坨硬编码字符串，升级成**分段组装的流水线**。
+
+---
+
+### 为什么需要这一步？
+
+如果还把 system prompt 当成一段写死的大文本，就会出现问题：
+
+- 工具列表变了要改 prompt
+- 新增 memory 要改 prompt
+- 当前模式、日期、目录等动态信息也得硬塞进去
+- 越来越难维护，也越来越容易出错
+
+**这一章的核心升级是**：把 system prompt 变成一条**流水线**，不同来源的信息按顺序拼接，最后组成完整的输入。
+
+### 怎么实现？
+
+#### 建立 Prompt Builder
+
+```python
+class SystemPromptBuilder:
+    def build(self) -> str:
+        parts = []
+        parts.append(self._build_core_identity())
+        parts.append(self._build_tools_section())
+        parts.append(self._build_skills_section())
+        parts.append(self._build_memory_section())
+        parts.append(self._build_claude_md_section())
+        parts.append(self._build_dynamic_context())
+        return "\n\n".join(p for p in parts if p.strip())
+```
+
+#### 每一段职责清晰
+
+- `_build_core_identity()`：“你是谁、你要怎么做事”
+- `_build_tools_section()`：当前可用的工具列表
+- `_build_memory_section()`：加载的长期记忆
+- `_build_dynamic_context()`：当前日期、工作目录、权限模式等每轮可能变化的信息
+
+#### 在 agent_loop 中使用
+
+```python
+def agent_loop(messages: list):
+    while True:
+        system = prompt_builder.build() # 每轮动态组装
+        
+        response = client.messages.create(
+            model=MODEL,
+            system=system,  # 使用组装后的 prompt
+            messages=messages,
+            tools=TOOLS,
+        )
+        ...
+```
+
+这样我们既保持了 system prompt 的稳定，又能灵活注入动态内容。
+
+## 错误恢复
+
+**错误不是例外，而是主循环必须预留出来的一条正常分支。**
+
+这一节我们给系统增加**错误恢复**能力：当出问题时，不是直接崩溃，而是先判断类型、再尝试续下去。
+
+### 为什么需要这一步？
+
+真实运行中总会遇到各种问题：
+
+- 模型输出被 token 限制截断
+- 上下文太长，请求直接失败
+- 网络抖动、API 超时、限流
+
+如果没有恢复机制，主循环一出错就停掉，用户体验会非常差。
+
+**这一节的核心目标是**：把“报错就崩”升级成“先分类错误，再选择恢复路径”，让 Agent 变得更健壮。
+
+
+### 最简单的心智模型
+
+```mermaid
+flowchart TD
+    A[调用模型] --> B{出错了?}
+    B -->|没有| C[正常处理工具]
+    B -->|有| D[判断错误类型]
+    D -->|输出截断| E[追加续写提示<br/>继续]
+    D -->|上下文过长| F[执行压缩<br/>再试]
+    D -->|临时网络问题| G[退避等待<br/>重试]
+    D -->|无法恢复| H[明确告诉用户失败]
+```
+
+**关键思想**：错误发生后，先分类，再恢复，最后才认输。
+
+### 怎么实现？
+
+#### 错误分类与恢复决策
+
+```python
+def choose_recovery(stop_reason: str = None, error_text: str = None) -> dict:
+    if stop_reason == "max_tokens":
+        return {"kind": "continue", "reason": "输出被截断，需要续写"}
+    
+    if error_text and "prompt is too long" in error_text.lower():
+        return {"kind": "compact", "reason": "上下文过长，需要压缩"}
+    
+    if error_text and any(word in error_text.lower() for word in ["timeout", "rate limit", "connection", "unavailable"]):
+        return {"kind": "backoff", "reason": "临时网络问题"}
+    
+    return {"kind": "fail", "reason": "无法恢复的错误"}
+```
+
+#### 给每种恢复路径加上预算保护
+
+```python
+recovery_state = {
+    "continuation_attempts": 0,
+    "compact_attempts": 0,
+    "backoff_attempts": 0,
+}
+```
+
+#### 接入主循环
+
+```python
+while True:
+    try:
+        response = client.messages.create(...)
+        
+        if response.stop_reason == "max_tokens":
+            if state["continuation_attempts"] >= 3:
+                break   # 超出预算
+            state["continuation_attempts"] += 1
+            messages.append({"role": "user", "content": CONTINUE_MESSAGE})
+            continue
+            
+    except Exception as e:
+        decision = choose_recovery(None, str(e))
+        
+        if decision["kind"] == "backoff":
+            if state["backoff_attempts"] >= 3:
+                break
+            time.sleep(backoff_delay(state["backoff_attempts"]))
+            state["backoff_attempts"] += 1
+            continue
+        else:
+            break   # 其他错误直接失败
+```
+
+**续写提示**（非常重要）：
+
+```python
+CONTINUE_MESSAGE = "Output was cut off. Continue directly from where you stopped. Do not repeat previous content."
+```
+
+## 任务系统（持久化工作图）
+
+**Todo 适合会话内规划，持久任务图才负责跨步骤、跨阶段协调工作。**
+
+这一章我们把“当前会话的待办清单”升级成**可持久化的任务图**，让复杂工作能跨会话、跨步骤、甚至跨多个 Agent 协同推进。
+
+### 为什么需要这一步？
+
+Todo 已经能帮 Agent 把大目标拆成几步，但它仍然存在明显限制：
+
+- 只活在当前会话里，上下文压缩后容易丢失
+- 不擅长表达“谁依赖谁、前置条件是什么”
+- 多个 Agent 协作时，没有统一的工作板
+
+例如下面这种工作：
+
+- 先写解析器 -> 再写语义检查 -> 测试和文档可以并行 -> 最后整体验收
+
+这已经不是简单列表，而是一张**带依赖关系的工作图**。
+
+**这一章的核心升级是**：引入持久化的 Task 系统，让工作目标能真正“活”在磁盘上，并且能自动处理依赖解锁。
+
+### 最简单的心智模型
+
+```mermaid
+flowchart TD
+    A[用户提出复杂目标] --> B[模型拆成任务]
+    B --> C[.tasks/ 目录]
+    C --> D[Task 1] --> E[Task 2 blockedBy: [1]]
+    E --> F[Task 3 blockedBy: [2]]
+    D -->|完成| G[自动解锁后续任务]
+    G --> H[模型看到新的 ready 任务]
+```
+
+任务不再只是“清单”，而是**带状态和依赖关系的工作图**。
+
+### 怎么实现？
+
+#### 任务存储结构（TaskRecord）
+
+每个任务保存为 `.tasks/task_xxx.json`：
+
+```python
+task = {
+    "id": 1,
+    "subject": "Write parser",
+    "description": "...",
+    "status": "pending",        # pending / in_progress / completed
+    "blockedBy": [2, 3],        # 还在等谁
+    "blocks": [5],              # 完成后会解锁谁
+    "owner": ""                 # 谁在负责
+}
+```
+
+#### TaskManager（核心管理器）
+
+```python
+class TaskManager:
+    def create(self, subject: str, description: str = "") -> str:
+        # 创建新任务并保存为 JSON
+    
+    def update(self, task_id: int, status=None, owner=None, addBlockedBy=None, addBlocks=None):
+        # 更新状态、设置依赖
+        if status == "completed":
+            self._clear_dependency(task_id)   # 自动解锁后续任务
+    
+    def list_all(self) -> str:
+        # 返回可读的任务板
+```
+
+#### 工具接入主循环
+
+```python
+TOOL_HANDLERS = {
+    "task_create": lambda **kw: TASKS.create(kw["subject"], kw.get("description", "")),
+    "task_update": lambda **kw: TASKS.update(...),
+    "task_list":   lambda **kw: TASKS.list_all(),
+    "task_get":    lambda **kw: TASKS.get(kw["task_id"]),
+}
+```
+
+模型可以随时调用这些工具来创建、更新、查看任务，而主循环完全不需要改动。
+
+## 后台任务
+
+**慢命令可以在旁边等，主循环不必陪着发呆。**
+
+这一章我们把**任务目标**和**实际运行槽位**分开，让慢操作跑到后台，主循环继续向前推进。
+
+### 为什么需要这一步？
+
+前面章节的工具调用都是同步的：
+
+模型发起 -> 立刻执行 -> 立刻返回结果
+
+这对短命令没问题，但遇到下面这些情况就会卡住：
+
+- `npm install`
+- `pytest` 全量测试
+- `docker build`
+- 大型代码生成或静态检查
+
+如果主循环一直傻等，用户和模型都会被堵住。
+
+**这一章的核心升级是**：把慢执行移到后台，让主循环继续做别的事情，结果通过通知稍后带回。
+
+### 最简单的心智模型
+
+```mermaid
+flowchart TD
+    A[主循环] --> B[模型决定跑慢命令]
+    B --> C[background_run]
+    C --> D[立刻返回 task_id]
+    D --> E[主循环继续做别的事]
+    
+    subgraph 后台执行线
+    F[真正执行 pytest...]
+    F --> G[完成后写通知队列]
+    end
+    
+    E --> H[下一轮前排空通知]
+    G --> H
+    H --> I[把摘要注入 messages]
+```
+
+**关键点**：主循环仍然只有一条，并行的是“等待”而不是主循环本身。
+
+### 怎么实现？
+
+#### 后台任务记录（RuntimeTaskRecord）
+
+```python
+runtime_task = {
+    "id": "a1b2c3d4",
+    "command": "pytest -q",
+    "status": "running",          # running / completed / failed / timeout
+    "started_at": 1710000000.0,
+    "result_preview": "12 passed...",
+    "output_file": ".runtime-tasks/a1b2c3d4.log"
+}
+```
+
+- JSON 文件记录运行状态
+- .log 文件保存完整输出
+
+#### BackgroundManager（核心管理器）
+
+```python
+class BackgroundManager:
+    def __init__(self):
+        self.tasks = {}           # 当前运行中的任务
+        self.notifications = []   # 完成后的通知
+        self.lock = threading.Lock()
+    
+    def run(self, command: str) -> str:
+        task_id = generate_id()
+        self.tasks[task_id] = {"id": task_id, "command": command, "status": "running"}
+        
+        # 启动后台线程
+        thread = threading.Thread(
+            target=self._execute,
+            args=(task_id, command),
+            daemon=True
+        )
+        thread.start()
+        
+        return f"Background task started: {task_id}"
+```
+
+#### 后台真正执行 + 写通知
+
+```python
+def _execute(self, task_id: str, command: str):
+    try:
+        result = subprocess.run(command, shell=True, cwd=WORKDIR, 
+                              capture_output=True, text=True, timeout=600)
+        preview = (result.stdout + result.stderr)[:800]
+        status = "completed"
+    except Exception as e:
+        preview = str(e)[:500]
+        status = "failed"
+    
+    with self.lock:
+        self.notifications.append({
+            "type": "background_completed",
+            "task_id": task_id,
+            "status": status,
+            "preview": preview
+        })
+```
+
+#### 主循环前排空通知
+
+```python
+def before_model_call(messages):
+    notifs = bg.drain_notifications()
+    if notifs:
+        text = "\n".join(f"[Background {n['task_id']}] {n['status']}: {n['preview']}" 
+                        for n in notifs)
+        messages.append({"role": "user", "content": text})
+```
+
+## 定时调度
+
+**当任务能后台运行以后，时间本身也会变成另一种启动入口。**
+
+这一章我们给系统增加**定时触发**能力：让 Agent 不只响应当前指令，还能安排未来某个时间自动开始工作。
+
+### 为什么需要这一步？
+
+上一节已经让慢命令可以跑到后台，但后台任务默认是“现在就启动”。
+
+现实中很多工作并不是立刻要做，而是要**在未来某个时间点**执行：
+
+- 每天晚上跑一次全量测试
+- 每周一早上生成周报
+- 30 分钟后提醒我继续检查某个 PR
+
+如果没有调度机制，用户就只能每次手动再说一遍，系统显得“只能当下响应”，而不是“能主动安排未来”。
+
+**这一节的核心升级是**：把一条未来要执行的意图先记下来，等时间到了再自动触发，回到主循环。
+
+### 最简单的心智模型
+
+```mermaid
+flowchart TD
+    A[模型调用 cron_create] --> B[保存调度记录]
+    B --> C[后台检查器每分钟检查一次]
+    C --> D{时间到了?}
+    D -->|是| E[生成通知]
+    E --> F[注入主循环的消息队列]
+    F --> G[下一轮模型看到提示并继续工作]
+    D -->|否| C
+```
+
+**关键点**：调度器只负责“记住未来何时开始”，真正做事时仍然回到同一条主循环。
+
+### 怎么实现？
+
+#### 调度记录（ScheduleRecord）
+
+```python
+schedule = {
+    "id": "job_001",
+    "cron": "0 9 * * 1",    # 每周一早上 9 点
+    "prompt": "Run the weekly status report",
+    "recurring": True,  # 是否重复
+    "durable": True,    # 是否落盘
+    "created_at": 1710000000.0,
+    "last_fired_at": None
+}
+```
+
+#### CronScheduler（核心调度器）
+
+```python
+class CronScheduler:
+    def create(self, cron_expr: str, prompt: str, recurring=True, durable=False):
+        # 创建并保存调度记录
+    
+    def start(self):
+        # 启动后台检查线程
+        self._thread = threading.Thread(target=self._check_loop, daemon=True)
+        self._thread.start()
+    
+    def _check_loop(self):
+        while True:
+            now = datetime.now()
+            self._check_tasks(now)
+            time.sleep(60)   # 每分钟检查一次
+```
+
+#### 时间到了就发通知
+
+```python
+def _check_tasks(self, now):
+    for task in self.tasks:
+        if cron_matches(task["cron"], now):
+            self.queue.put(f"[Scheduled {task['id']}] {task['prompt']}")
+            task["last_fired_at"] = time.time()
+```
+
+#### 主循环前排空定时通知
+
+```python
+notifications = scheduler.drain_notifications()
+for note in notifications:
+    messages.append({"role": "user", "content": note})
+```
+
+这样定时任务最终还是通过普通 user message 的形式回到模型手里。
